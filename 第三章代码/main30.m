@@ -22,7 +22,9 @@ script_dir = fileparts(mfilename('fullpath'));
 addpath(script_dir, fileparts(script_dir));
 runtime = gate0_runtime('chapter3', mfilename);
 
-if isempty(gcp('nocreate'))
+if runtime.is_smoke
+    fprintf('[Gate1] smoke 模式跳过未使用的 MATLAB 并行池。\n');
+elseif isempty(gcp('nocreate'))
     parpool('local');
 end
 gpuDevice(1);
@@ -32,9 +34,12 @@ gpuDevice(1);
 %% ═══════════════════════════════════════
 set_list = {'train', 'val', 'test'};
 if runtime.is_smoke
-    trials_list = [4, 2, 2];
+    trials_list = [8, 4, 4];
+    smoke_seed_val = int32(20260820);
+    rng(double(smoke_seed_val), 'twister');
 else
     trials_list = [40000, 5000, 5000];
+    smoke_seed_val = int32(-1);
 end
 
 fc          = 5800e6;
@@ -162,6 +167,8 @@ B_win_val         = single(B_win);
 B_step_val        = single(B_step);
 fs_val            = single(fs);
 symbolRate_val    = single(symbolRate);
+BW_actual_val     = single(BW_actual);
+arfa_val          = single(arfa_V);
 sub_f_lo_val      = single(sub_f_lo);
 sub_f_hi_val      = single(sub_f_hi);
 thresh_val        = single(thresh);
@@ -468,6 +475,7 @@ for si = 1:length(set_list)
         'N_sub_val', 'max_src_val', 'num_grid', ...
         'edge_val', 'lamda_val', ...
         'B_win_val', 'B_step_val', 'fs_val', 'symbolRate_val', ...
+        'BW_actual_val', 'arfa_val', 'smoke_seed_val', ...
         'sub_f_lo_val', 'sub_f_hi_val', ...
         'thresh_val', 'num_count_classes', ...
         '-v7.3');

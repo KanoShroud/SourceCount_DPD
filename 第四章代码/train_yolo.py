@@ -24,19 +24,45 @@ train_yolo.py — YOLOv8 + CenterNet 训练脚本（精简版）
   D6:  best_yolo_dualhead_cw.pth
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import argparse
+import copy
+import json
+import os
+import platform
+import random
+import sys
+import time
+from pathlib import Path
+
 import numpy as np
-import os, copy, argparse, random
+import psutil
+import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from scipy.optimize import linear_sum_assignment
 
-from yolo_config import *
+from yolo_config import (
+    BOX_SIZE,
+    DEFAULT_BATCH,
+    DEFAULT_DEVICE,
+    DEFAULT_EPOCHS,
+    DEFAULT_LR,
+    DEFAULT_PATIENCE,
+    EDGE,
+    GRID_SIZE,
+    LAMDA,
+    MAX_SRC,
+    PEAK_SIZE,
+    REG_MAX,
+    STRIDES,
+)
 from yolo_model import (
-    YOLOv8Loc, DetectHead,
-    ciou_loss, dfl_loss, focal_loss_hm, dice_loss,
-    nms_heatmap, extract_peaks_topn, decode_bbox_topn, pixel_to_phys,
+    YOLOv8Loc,
+    ciou_loss,
+    dice_loss,
+    focal_loss_hm,
+    nms_heatmap,
+    pixel_to_phys,
 )
 
 from chapter_runtime import (
@@ -44,6 +70,101 @@ from chapter_runtime import (
     device as runtime_device,
     output_dir as runtime_output_dir,
 )
+
+
+def _json_default(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, torch.Tensor) and value.numel() == 1:
+        return value.item()
+    raise TypeError(f"无法 JSON 序列化 {type(value).__name__}")
+
+
+def write_json(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', encoding='utf-8') as handle:
+        json.dump(
+            payload,
+            handle,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+            default=_json_default,
+        )
+
+
+def append_jsonl(path, payload):
+    with Path(path).open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            default=_json_default,
+        ) + '\n')
+
+
+def process_rss_bytes():
+    process = psutil.Process(os.getpid())
+    rss = process.memory_info().rss
+    for child in process.children(recursive=True):
+        try:
+            rss += child.memory_info().rss
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            pass
+    return int(rss)
+
+
+def configure_reproducibility(seed, deterministic):
+    if deterministic:
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
+    torch.use_deterministic_algorithms(deterministic, warn_only=False)
+
+
+def capture_rng_state(train_generator):
+    return {
+        'python': random.getstate(),
+        'numpy': np.random.get_state(),
+        'torch_cpu': torch.get_rng_state(),
+        'torch_cuda': torch.cuda.get_rng_state_all(),
+        'train_loader_generator': train_generator.get_state(),
+    }
+
+
+def restore_rng_state(state, train_generator):
+    random.setstate(state['python'])
+    np.random.set_state(state['numpy'])
+    torch.set_rng_state(state['torch_cpu'])
+    torch.cuda.set_rng_state_all(state['torch_cuda'])
+    train_generator.set_state(state['train_loader_generator'])
+
+
+def checkpoint_payload(
+    *, model_state, args, epoch, best_rmse, optimizer, scheduler, scaler,
+    history, train_generator, save_tag,
+):
+    return {
+        # 保留历史评估脚本依赖的 ``model`` 键。
+        'model': model_state,
+        'method': args.method,
+        'save_tag': save_tag,
+        'epoch': int(epoch),
+        'best_rmse': None if not np.isfinite(best_rmse) else float(best_rmse),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
+        'scaler': scaler.state_dict(),
+        'args': vars(args).copy(),
+        'history': history,
+        'rng_state': capture_rng_state(train_generator),
+    }
 
 
 # ═══════════════════════════════════════
@@ -385,6 +506,15 @@ def evaluate(model, loader, device, method, peak_size=PEAK_SIZE, full_metrics=Tr
             else:
                 pred_hm = model(dpd)
 
+        if method == 'bbox':
+            if not all(bool(torch.isfinite(value).all()) for value in (*cls_list, *reg_list)):
+                raise FloatingPointError('验证阶段 bbox 输出含 NaN/Inf')
+        elif _is_dualhead:
+            if not bool(torch.isfinite(pred_hm).all() and torch.isfinite(pred_offset).all()):
+                raise FloatingPointError('验证阶段 heatmap/offset 输出含 NaN/Inf')
+        elif not bool(torch.isfinite(pred_hm).all()):
+            raise FloatingPointError('验证阶段 heatmap 输出含 NaN/Inf')
+
         # 所有 loss 在 autocast 外
         if method == 'bbox':
             loss, _, _, _ = compute_bbox_loss(model, cls_list, reg_list, tgt, device)
@@ -403,6 +533,8 @@ def evaluate(model, loader, device, method, peak_size=PEAK_SIZE, full_metrics=Tr
             if dice_weight > 0:
                 loss = loss + dice_weight * dice_loss(pred_hm.float(), tgt_dev)
 
+        if not bool(torch.isfinite(loss)):
+            raise FloatingPointError('验证阶段 loss 含 NaN/Inf')
         total_loss += loss.item(); n_batches += 1
 
         if full_metrics:
@@ -464,7 +596,9 @@ def evaluate(model, loader, device, method, peak_size=PEAK_SIZE, full_metrics=Tr
                 errs.extend(hungarian_match_eval(pred_phys, true_phys, n).tolist())
                 ns_list.extend([n] * n)
 
-    R = {'val_loss': total_loss / max(n_batches, 1)}
+    if n_batches == 0:
+        raise RuntimeError('验证 DataLoader 没有产生 batch')
+    R = {'val_loss': total_loss / n_batches}
     if full_metrics and len(errs) > 0:
         errs = np.array(errs); ns_list = np.array(ns_list)
         R.update({
@@ -497,6 +631,8 @@ def main():
     pa.add_argument('--device', type=str, default=DEFAULT_DEVICE)
     pa.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS)
     pa.add_argument('--batch_size', type=int, default=DEFAULT_BATCH)
+    pa.add_argument('--val_batch_size', type=int, default=None,
+                    help='验证 batch；未指定时沿用历史规则 max(batch_size//2, 32)')
     pa.add_argument('--lr', type=float, default=DEFAULT_LR)
     pa.add_argument('--patience', type=int, default=DEFAULT_PATIENCE)
     pa.add_argument('--peak_size', type=int, default=PEAK_SIZE)
@@ -516,20 +652,71 @@ def main():
                     help='D6_soft: 软置信度加权 (floor=0.5)')
     pa.add_argument('--grad_alpha', type=float, default=1.0,
                     help='D4: offset 梯度回传到 backbone 的缩放因子 (0~1, 默认1.0=D5)')
+    pa.add_argument('--seed', type=int, default=42)
+    pa.add_argument('--deterministic', action='store_true', default=False,
+                    help='启用严格确定性算法；不支持的算子会直接报错')
+    pa.add_argument('--fail_on_nonfinite', action='store_true', default=False,
+                    help='每个 epoch 额外检查全部模型参数是否有限')
+    pa.add_argument('--save_last_every_epoch', action='store_true', default=False,
+                    help='每个 epoch 覆盖保存可诊断的 last checkpoint')
+    pa.add_argument('--require_empty_output', action='store_true', default=False,
+                    help='拒绝写入已有文件的输出目录')
+    pa.add_argument('--gate3_d8', action='store_true', default=False,
+                    help='Gate 3 D8 固定配置强校验，不改变训练算法')
+    pa.add_argument('--gate3b_d8', action='store_true', default=False,
+                    help='Gate 3B D8 60 epoch 固定配置强校验，不改变训练算法')
+    pa.add_argument('--run_label', type=str, default='')
     args = pa.parse_args()
+    if args.batch_size <= 0:
+        pa.error('--batch_size 必须为正整数')
+    if args.val_batch_size is not None and args.val_batch_size <= 0:
+        pa.error('--val_batch_size 必须为正整数')
+    if args.epochs <= 0 or args.patience <= 0 or args.eval_every <= 0:
+        pa.error('epochs、patience 与 eval_every 必须为正整数')
+    if args.seed < 0:
+        pa.error('--seed 必须为非负整数')
 
-    # 固定随机种子
-    seed = 42
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
+    if args.gate3_d8 or args.gate3b_d8:
+        gate3_checks = {
+            'method=dualhead': args.method == 'dualhead',
+            'amp=False': not args.amp,
+            'dice_weight=0': args.dice_weight == 0.0,
+            'grad_alpha=1': args.grad_alpha == 1.0,
+            'offset_weight=1': args.offset_weight == 1.0,
+            'conf_weight_offset=False': not args.conf_weight_offset,
+            'soft_conf=False': not args.soft_conf,
+            'batch_size=8': args.batch_size == 8,
+            'val_batch_size=8': args.val_batch_size == 8,
+            'lr=1e-3': args.lr == 1e-3,
+            'weight_decay=5e-3': args.weight_decay == 5e-3,
+            'dropout=0.4': args.dropout == 0.4,
+            'eval_every=1': args.eval_every == 1,
+            'deterministic=True': args.deterministic,
+            'fail_on_nonfinite=True': args.fail_on_nonfinite,
+            'save_last_every_epoch=True': args.save_last_every_epoch,
+            'require_empty_output=True': args.require_empty_output,
+        }
+        failed = [name for name, passed in gate3_checks.items() if not passed]
+        if failed:
+            pa.error('Gate 3 D8 参数不符合冻结配置: ' + ', '.join(failed))
+    if args.gate3b_d8:
+        gate3b_checks = {
+            'epochs=60': args.epochs == 60,
+            'patience=60': args.patience == 60,
+            'seed=42': args.seed == 42,
+            'gate3_d8=False': not args.gate3_d8,
+        }
+        failed = [name for name, passed in gate3b_checks.items() if not passed]
+        if failed:
+            pa.error('Gate 3B D8 参数不符合冻结配置: ' + ', '.join(failed))
+
+    configure_reproducibility(args.seed, args.deterministic)
 
     device = runtime_device(args.device)
-    output_dir = args.output_dir or str(runtime_output_dir('train_yolo'))
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = Path(args.output_dir or str(runtime_output_dir('train_yolo'))).resolve()
+    if args.require_empty_output and output_dir.exists() and any(output_dir.iterdir()):
+        pa.error(f'--require_empty_output 拒绝写入非空目录: {output_dir}')
+    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Device: {device}")
     print(f"Method: {args.method}")
     print(f"Peak/NMS size: {args.peak_size}, Box size: {args.box_size}")
@@ -538,13 +725,14 @@ def main():
     if args.method in ('dualhead', 'distfield_dual'):
         print(f"Offset weight: {args.offset_weight}")
         if args.conf_weight_offset:
-            print(f"Conf-weighted offset: enabled (D6)")
+            print("Conf-weighted offset: enabled (D6)")
         if args.grad_alpha < 1.0:
             print(f"Grad alpha: {args.grad_alpha} (D4 梯度衰减)")
     if args.weight_decay != 5e-3:
         print(f"Weight decay: {args.weight_decay}")
     if args.dropout != 0.4:
         print(f"Dropout: {args.dropout}")
+    print(f"Seed/deterministic: {args.seed}/{args.deterministic}")
 
     method_to_model = {
         'bbox': 'bbox', 'gauss': 'heatmap', 'distfield': 'heatmap',
@@ -575,16 +763,42 @@ def main():
     else:
         save_tag = args.method      # D1/D2/D3/D5
 
+    environment = {
+        'python': sys.version,
+        'platform': platform.platform(),
+        'numpy': np.__version__,
+        'torch': torch.__version__,
+        'cuda_runtime': torch.version.cuda,
+        'cudnn': torch.backends.cudnn.version(),
+        'gpu_name': torch.cuda.get_device_name(device) if device.type == 'cuda' else None,
+        'cublas_workspace_config': os.environ.get('CUBLAS_WORKSPACE_CONFIG'),
+        'pythonhashseed': os.environ.get('PYTHONHASHSEED'),
+    }
+    write_json(output_dir / 'run_config.json', {
+        'status': 'CONFIGURED',
+        'run_label': args.run_label,
+        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8) else save_tag,
+        'args': vars(args),
+        'environment': environment,
+        'performance_interpretation_allowed': False,
+    })
+
     # 数据
     train_ds = LocDataset(args.data_dir, 'train', method=args.method, box_size=args.box_size,
                           augment=True, dist_alpha=args.dist_alpha)
     val_ds   = LocDataset(args.data_dir, 'val', method=args.method, box_size=args.box_size,
                           augment=False, dist_alpha=args.dist_alpha)
     cfn = collate_fn_bbox if args.method == 'bbox' else collate_fn_hm
+    train_generator = torch.Generator()
+    train_generator.manual_seed(args.seed)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=0, pin_memory=True, drop_last=True, collate_fn=cfn)
-    val_loader   = DataLoader(val_ds, batch_size=max(args.batch_size // 2, 32), shuffle=False,
+                              num_workers=0, pin_memory=True, drop_last=True, collate_fn=cfn,
+                              generator=train_generator)
+    val_batch_size = (args.val_batch_size if args.val_batch_size is not None
+                      else max(args.batch_size // 2, 32))
+    val_loader   = DataLoader(val_ds, batch_size=val_batch_size, shuffle=False,
                               num_workers=0, pin_memory=True, collate_fn=cfn)
+    print(f"Train/val batch size: {args.batch_size}/{val_batch_size}")
 
     # 模型
     model = YOLOv8Loc(method=model_method, dropout=args.dropout, grad_alpha=args.grad_alpha).to(device)
@@ -595,14 +809,48 @@ def main():
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.amp.GradScaler(enabled=args.amp, init_scale=2**10)
 
-    best_rmse = float('inf'); best_st = None; no_imp = 0
+    initial_validation_path = None
+    initial_validation = None
+    if args.gate3b_d8:
+        rng_before_initial_validation = capture_rng_state(train_generator)
+        try:
+            initial_validation = evaluate(
+                model, val_loader, device, args.method,
+                peak_size=args.peak_size, full_metrics=True, amp=args.amp,
+                offset_weight=args.offset_weight,
+                conf_weight_offset=args.conf_weight_offset,
+                soft_conf=args.soft_conf, dice_weight=args.dice_weight,
+            )
+        finally:
+            restore_rng_state(rng_before_initial_validation, train_generator)
+        initial_validation_path = output_dir / 'initial_validation.json'
+        write_json(initial_validation_path, {
+            'split': 'val',
+            'checkpoint_selection': 'initial_untrained_model',
+            'metrics': initial_validation,
+            'rng_state_restored': True,
+            'performance_interpretation_allowed': False,
+        })
+
+    best_rmse = float('inf'); best_st = None; best_epoch = None; no_imp = 0
     hist = {'tl': [], 'vl': [], 'vrmse': [], 'vmean': [], 'vmed': [], 'v30': [], 'v50': [], 'vrmse_ep': []}
+    epoch_records = []
+    history_jsonl = output_dir / 'epoch_history.jsonl'
+    history_json = output_dir / 'epoch_history.json'
+    if history_jsonl.exists():
+        raise FileExistsError(f'结构化历史已存在，拒绝追加覆盖: {history_jsonl}')
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+    training_started = time.perf_counter()
+    stopped_early = False
 
     for ep in range(args.epochs):
+        epoch_started = time.perf_counter()
         model.train(); tl, nb = 0, 0
         tl_focal, tl_dice, tl_offset = 0, 0, 0
 
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader):
             dpd = batch[0].to(device)
             tgt = batch[1]
 
@@ -643,13 +891,17 @@ def main():
                     loss = l_focal
                 tl_focal += l_focal.item()
 
-            if not torch.isfinite(loss):
-                loss = loss.detach(); opt.zero_grad(set_to_none=True); continue
+            if not bool(torch.isfinite(loss)):
+                raise FloatingPointError(
+                    f'训练 loss 非有限: epoch={ep + 1}, batch={batch_index + 1}'
+                )
 
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), 10.0, error_if_nonfinite=True
+            )
             scaler.step(opt); scaler.update()
             tl += loss.item(); nb += 1
 
@@ -673,6 +925,8 @@ def main():
                     else:
                         print(f"    loss={loss.item():.4f} (focal={l_focal.item():.4f})")
 
+        if nb == 0:
+            raise RuntimeError(f'epoch={ep + 1} 没有产生有效训练 batch')
         sch.step(); lr = sch.get_last_lr()[0]
 
         do_full = (ep + 1) % args.eval_every == 0 or ep == 0 or ep >= args.epochs - 1
@@ -718,18 +972,91 @@ def main():
             hist['v30'].append(vr.get('within_30m', 0)); hist['v50'].append(vr.get('within_50m', 0))
             hist['vrmse_ep'].append(ep + 1)
 
+        best_updated = False
         if do_full and ep >= 5 and vr['rmse'] < best_rmse:
             best_rmse = vr['rmse']
             best_st = copy.deepcopy(model.state_dict()); no_imp = 0
+            best_epoch = ep + 1
+            best_updated = True
             print(f"  ★ Best RMSE={best_rmse:.1f}m (mean={vr['mean_error']:.1f}m "
                   f"med={vr['median_error']:.1f}m <30m={vr['within_30m']:.1%} <50m={vr['within_50m']:.1%})")
-            torch.save(
-                {'model': best_st, 'method': args.method, 'best_rmse': best_rmse},
-                os.path.join(output_dir, f'best_yolo_{save_tag}.pth'),
-            )
         elif do_full:
             no_imp += 1
+
+        if args.fail_on_nonfinite:
+            bad_parameter = next((
+                name for name, parameter in model.named_parameters()
+                if not bool(torch.isfinite(parameter).all())
+            ), None)
+            if bad_parameter is not None:
+                raise FloatingPointError(
+                    f'epoch={ep + 1} 后参数 {bad_parameter} 含 NaN/Inf'
+                )
+
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        epoch_seconds = time.perf_counter() - epoch_started
+        epoch_record = {
+            'epoch': ep + 1,
+            'train_loss': tl / nb,
+            'train_focal_loss': tl_focal / nb if args.method != 'bbox' else None,
+            'train_dice_loss': tl_dice / nb if args.method != 'bbox' and args.dice_weight > 0 else None,
+            'train_offset_loss': tl_offset / nb if is_dualhead else None,
+            'val_loss': vr['val_loss'],
+            'full_metrics': do_full,
+            'rmse': vr.get('rmse'),
+            'mean_error': vr.get('mean_error'),
+            'median_error': vr.get('median_error'),
+            'within_10m': vr.get('within_10m'),
+            'within_30m': vr.get('within_30m'),
+            'within_50m': vr.get('within_50m'),
+            'rmse_N2': vr.get('rmse_N2'),
+            'rmse_N3': vr.get('rmse_N3'),
+            'count_N2': vr.get('count_N2'),
+            'count_N3': vr.get('count_N3'),
+            'learning_rate': lr,
+            'train_batches': nb,
+            'epoch_seconds': epoch_seconds,
+            'process_rss_bytes': process_rss_bytes(),
+            'cuda_peak_allocated_bytes': int(torch.cuda.max_memory_allocated(device)) if device.type == 'cuda' else 0,
+            'cuda_peak_reserved_bytes': int(torch.cuda.max_memory_reserved(device)) if device.type == 'cuda' else 0,
+            'best_rmse_so_far': None if not np.isfinite(best_rmse) else float(best_rmse),
+            'no_improvement_count': no_imp,
+        }
+        epoch_records.append(epoch_record)
+        append_jsonl(history_jsonl, epoch_record)
+        write_json(history_json, epoch_records)
+
+        if best_updated:
+            torch.save(checkpoint_payload(
+                model_state=best_st,
+                args=args,
+                epoch=ep + 1,
+                best_rmse=best_rmse,
+                optimizer=opt,
+                scheduler=sch,
+                scaler=scaler,
+                history=epoch_records,
+                train_generator=train_generator,
+                save_tag=save_tag,
+            ), output_dir / f'best_yolo_{save_tag}.pth')
+
+        if args.save_last_every_epoch:
+            torch.save(checkpoint_payload(
+                model_state=model.state_dict(),
+                args=args,
+                epoch=ep + 1,
+                best_rmse=best_rmse,
+                optimizer=opt,
+                scheduler=sch,
+                scaler=scaler,
+                history=epoch_records,
+                train_generator=train_generator,
+                save_tag=save_tag,
+            ), output_dir / f'last_yolo_{save_tag}.pth')
+
         if no_imp >= args.patience:
+            stopped_early = True
             print(f"\nEarly stop at epoch {ep+1}"); break
 
     # 画图
@@ -748,6 +1075,7 @@ def main():
     ax[2].set_title('Val <50m (%)'); ax[2].grid(True)
     curves_path = os.path.join(output_dir, f'training_curves_{save_tag}.png')
     plt.tight_layout(); plt.savefig(curves_path, dpi=120)
+    plt.close(fig)
     print(f"Curves saved: {curves_path}")
 
     if best_st is not None: model.load_state_dict(best_st)
@@ -760,6 +1088,36 @@ def main():
             if 'within' in k: print(f"  {k}: {v:.1%}")
             elif 'loss' in k: print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v:.1f}m")
+    write_json(output_dir / 'final_validation.json', {
+        'split': 'val',
+        'checkpoint_selection': 'best_rmse' if best_st is not None else 'last_epoch',
+        'metrics': vr,
+        'performance_interpretation_allowed': False,
+    })
+    write_json(output_dir / 'training_summary.json', {
+        'status': 'PASS',
+        'run_label': args.run_label,
+        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8) else save_tag,
+        'epochs_completed': len(epoch_records),
+        'stopped_early': stopped_early,
+        'best_epoch': best_epoch,
+        'best_rmse': None if not np.isfinite(best_rmse) else float(best_rmse),
+        'final_learning_rate': float(sch.get_last_lr()[0]),
+        'total_elapsed_seconds': time.perf_counter() - training_started,
+        'process_rss_bytes_end': process_rss_bytes(),
+        'cuda_peak_allocated_bytes': int(torch.cuda.max_memory_allocated(device)) if device.type == 'cuda' else 0,
+        'cuda_peak_reserved_bytes': int(torch.cuda.max_memory_reserved(device)) if device.type == 'cuda' else 0,
+        'best_checkpoint': str((output_dir / f'best_yolo_{save_tag}.pth').resolve()) if best_st is not None else None,
+        'last_checkpoint': str((output_dir / f'last_yolo_{save_tag}.pth').resolve()) if args.save_last_every_epoch else None,
+        'history_json': str(history_json.resolve()),
+        'history_jsonl': str(history_jsonl.resolve()),
+        'initial_validation': (
+            str(initial_validation_path.resolve()) if initial_validation_path is not None else None
+        ),
+        'initial_validation_metrics': initial_validation,
+        'final_validation': str((output_dir / 'final_validation.json').resolve()),
+        'performance_interpretation_allowed': False,
+    })
     print("\nDone!")
 
 

@@ -20,8 +20,12 @@ script_dir = fileparts(mfilename('fullpath'));
 addpath(script_dir, fileparts(script_dir));
 runtime = gate0_runtime('chapter4', mfilename);
 
-if isempty(gcp('nocreate'))
-    parpool('local');
+if runtime.is_smoke
+    fprintf('[Gate2] smoke 模式跳过主循环未使用的 MATLAB 并行池。\n');
+else
+    if isempty(gcp('nocreate'))
+        parpool('local');
+    end
 end
 
 %% ═══════════════════════════════════════
@@ -29,10 +33,52 @@ end
 %% ═══════════════════════════════════════
 set_list = {'train', 'val', 'test'};
 if runtime.is_smoke
-    trials_list = [2, 1, 1];
+    trials_list = [4, 2, 2];
+    random_seed_val = int32(20260821);
+
+    trials_env = strtrim(getenv('SOURCECOUNT_CH4_TRIALS_LIST'));
+    if ~isempty(trials_env)
+        if isempty(regexp(trials_env, '^\s*\d+\s*,\s*\d+\s*,\s*\d+\s*$', 'once'))
+            error(['SOURCECOUNT_CH4_TRIALS_LIST 必须是 3 个逗号分隔的正整数，' ...
+                '例如 1024,256,256。当前值: %s'], trials_env);
+        end
+        parsed_trials = sscanf(trials_env, '%f,%f,%f');
+        trials_cap = [2048, 512, 512];
+        if numel(parsed_trials) ~= 3 || any(~isfinite(parsed_trials)) || ...
+                any(parsed_trials <= 0) || any(parsed_trials ~= floor(parsed_trials))
+            error(['SOURCECOUNT_CH4_TRIALS_LIST 必须是 3 个逗号分隔的正整数，' ...
+                '例如 1024,256,256。当前值: %s'], trials_env);
+        end
+        trials_list = double(parsed_trials(:)).';
+        if any(trials_list > trials_cap)
+            error(['smoke trials 超出 Gate 3 硬上限 [%d,%d,%d]，当前为 ' ...
+                '[%d,%d,%d]。'], trials_cap, trials_list);
+        end
+        fprintf('[Gate3] smoke trials 覆盖为 [%d,%d,%d]。\n', trials_list);
+    end
+
+    seed_env = strtrim(getenv('SOURCECOUNT_CH4_RANDOM_SEED'));
+    if ~isempty(seed_env)
+        if isempty(regexp(seed_env, '^\d+$', 'once'))
+            error(['SOURCECOUNT_CH4_RANDOM_SEED 必须是 [0,%d] 内的整数，' ...
+                '当前值: %s'], intmax('int32'), seed_env);
+        end
+        parsed_seed = str2double(seed_env);
+        if ~isfinite(parsed_seed) || parsed_seed < 0 || ...
+                parsed_seed ~= floor(parsed_seed) || parsed_seed > double(intmax('int32'))
+            error(['SOURCECOUNT_CH4_RANDOM_SEED 必须是 [0,%d] 内的整数，' ...
+                '当前值: %s'], intmax('int32'), seed_env);
+        end
+        random_seed_val = int32(parsed_seed);
+        fprintf('[Gate3] smoke 随机种子覆盖为 %d。\n', random_seed_val);
+    end
+    rng(double(random_seed_val), 'twister');
 else
     trials_list = [40000, 5000, 5000];
+    random_seed_val = int32(-1);
 end
+runtime_mode_val = runtime.mode;
+trials_list_val = int32(trials_list);
 
 fc          = 5800e6;
 arfa_V      = 0.25;
@@ -504,6 +550,7 @@ for si = 1:length(set_list)
         'B_win_val', 'B_step_val', 'fs_val', ...
         'sub_f_lo_val', 'sub_f_hi_val', ...
         'thresh_val', 'num_count_classes', ...
+        'runtime_mode_val', 'random_seed_val', 'trials_list_val', ...
         '-v7.3');
 
     fprintf('已保存至 %s\n', save_file);

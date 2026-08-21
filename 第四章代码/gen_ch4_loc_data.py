@@ -20,6 +20,9 @@ import h5py
 import torch
 import os
 import argparse
+import json
+import time
+from pathlib import Path
 from dpd_calculator_torch import DPDGeometry, compute_fine_dpd, compute_hyperbola_mask
 
 from chapter_runtime import (
@@ -171,10 +174,36 @@ def main():
                         choices=['max', 'sum'], help='双曲线叠加模式')
     parser.add_argument('--gauss_sigma', type=float, default=2.0,
                         help='高斯热力图σ（像素）')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='最多处理多少个 IQ 样本；默认处理全部')
+    parser.add_argument('--expected_tasks', type=int, default=None,
+                        help='可选：要求最终任务数精确等于此值，否则门禁失败')
+    parser.add_argument('--require_empty_output', action='store_true',
+                        help='要求当前 split 输出目录不存在或为空，防止覆盖既有证据')
+    parser.add_argument('--chunk_size', type=int, default=40000,
+                        help='细 DPD 每次处理的候选网格点数')
+    parser.add_argument('--report_path', type=str, default=None,
+                        help='可选 JSON 计时与资源报告路径')
     args = parser.parse_args()
+    if args.max_samples is not None and args.max_samples <= 0:
+        parser.error('--max_samples 必须为正整数')
+    if args.expected_tasks is not None and args.expected_tasks <= 0:
+        parser.error('--expected_tasks 必须为正整数')
+    if args.shard_size <= 0:
+        parser.error('--shard_size 必须为正整数')
+    if args.chunk_size <= 0:
+        parser.error('--chunk_size 必须为正整数')
 
     device = runtime_device(args.device)
     output_dir = args.output_dir or str(runtime_data_dir(create=True))
+    split_output_dir = Path(output_dir).resolve() / args.split
+    if args.require_empty_output and split_output_dir.exists():
+        existing = list(split_output_dir.iterdir())
+        if existing:
+            raise FileExistsError(
+                f"--require_empty_output 拒绝覆盖非空目录: {split_output_dir}"
+            )
+    started = time.perf_counter()
     print(f"Device: {device}")
     print(f"Fine grid: ±{args.edge}m, step {args.lamda}m")
     print(f"Shard size: {args.shard_size} tasks per file")
@@ -215,6 +244,15 @@ def main():
         bw_actual = bw_actual.transpose(1, 0)    # (N, max_src)
 
     N = len(src_count)
+    if args.max_samples is not None:
+        N = min(N, args.max_samples)
+        sig_real = sig_real[:N]
+        sig_imag = sig_imag[:N]
+        src_count = src_count[:N]
+        src_pos = src_pos[:N]
+        fc_offset = fc_offset[:N]
+        if has_per_src_bw:
+            bw_actual = bw_actual[:N]
     rcv_num = sig_real.shape[1]
     print(f"  {N} samples, {rcv_num} stations")
 
@@ -247,11 +285,11 @@ def main():
     rcvPos = np.stack([R_rcv * np.cos(angles), R_rcv * np.sin(angles)], axis=1)
 
     # DPD 几何信息预计算
-    print(f"\nPrecomputing DPD geometry...")
+    print("\nPrecomputing DPD geometry...")
     geo = DPDGeometry(rcvPos, [0.0, 0.0], args.edge, args.lamda, FS, LEN, device)
 
     # ── 生成定位任务（分片保存）──
-    print(f"\nGenerating localization tasks (actual bandwidth filtering)...")
+    print("\nGenerating localization tasks (actual bandwidth filtering)...")
 
     shard_data = new_shard_data()
     shard_idx = 0
@@ -259,6 +297,7 @@ def main():
     n_total_tasks = 0
     n_skip_0src = 0
     task_n_src_counts = {1: 0, 2: 0, 3: 0}
+    task_reports = []
 
     for i in range(N):
         if i % 500 == 0:
@@ -308,7 +347,33 @@ def main():
                 continue
 
             # 计算细 DPD
-            mtr = compute_fine_dpd(sig_complex, geo, freq_mask=freq_mask)
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+                torch.cuda.reset_peak_memory_stats(device)
+            task_started = time.perf_counter()
+            mtr = compute_fine_dpd(
+                sig_complex, geo, freq_mask=freq_mask, chunk_size=args.chunk_size
+            )
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+            task_elapsed = time.perf_counter() - task_started
+            task_reports.append({
+                'sample_idx': int(i),
+                'group_idx': int(gi),
+                'n_src': int(n_src_group),
+                'freq_lo_hz': float(group['freq_lo']),
+                'freq_hi_hz': float(group['freq_hi']),
+                'n_band': int(np.count_nonzero(freq_mask)),
+                'elapsed_seconds': task_elapsed,
+                'cuda_peak_allocated_bytes': (
+                    int(torch.cuda.max_memory_allocated(device))
+                    if device.type == 'cuda' else 0
+                ),
+                'cuda_peak_reserved_bytes': (
+                    int(torch.cuda.max_memory_reserved(device))
+                    if device.type == 'cuda' else 0
+                ),
+            })
 
             # ── 检查点: 前 10 个任务验证 DPD 峰值位置 ──
             if n_total_tasks < 10:
@@ -402,6 +467,11 @@ def main():
         shard_files.append(path)
         shard_idx += 1
 
+    if args.expected_tasks is not None and n_total_tasks != args.expected_tasks:
+        raise RuntimeError(
+            f"任务数不符合预期: expected={args.expected_tasks}, actual={n_total_tasks}"
+        )
+
     # ── 保存索引文件 ──
     split_dir = os.path.join(output_dir, args.split)
     index_path = os.path.join(split_dir, f'loc_{args.split}_index.pt')
@@ -426,6 +496,29 @@ def main():
     total_size = sum(os.path.getsize(f) for f in shard_files) / 1e9
     print(f"  Total size: {total_size:.2f} GB")
     print(f"  Index: {index_path}")
+    if args.report_path:
+        report_path = Path(args.report_path).resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report = {
+            'status': 'PASS',
+            'split': args.split,
+            'data_dir': str(Path(args.data_dir).resolve()),
+            'output_dir': str(Path(output_dir).resolve()),
+            'device': str(device),
+            'max_samples': args.max_samples,
+            'expected_tasks': args.expected_tasks,
+            'shard_size': args.shard_size,
+            'chunk_size': args.chunk_size,
+            'n_input_samples': int(N),
+            'n_total_tasks': int(n_total_tasks),
+            'n_shards': int(shard_idx),
+            'task_n_src_counts': {str(k): int(v) for k, v in task_n_src_counts.items()},
+            'elapsed_seconds': time.perf_counter() - started,
+            'tasks': task_reports,
+        }
+        with report_path.open('w', encoding='utf-8') as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=2, allow_nan=False)
+        print(f"  Report: {report_path}")
     print("Done!")
 
 
