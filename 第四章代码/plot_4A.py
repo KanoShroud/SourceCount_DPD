@@ -6,6 +6,16 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+import argparse
+import os
+
+from chapter_runtime import output_dir as runtime_output_dir
+
+parser = argparse.ArgumentParser(description='绘制第四章实验 4A 图')
+parser.add_argument('--output_dir', default=None)
+args = parser.parse_args()
+output_dir = args.output_dir or str(runtime_output_dir('plot_4A'))
+os.makedirs(output_dir, exist_ok=True)
 
 plt.rcParams.update({
     'font.family': 'serif',
@@ -62,8 +72,8 @@ ax1.set_ylim([8, 2000])
 ax1.grid(True, alpha=0.3, which='both')
 ax1.legend(loc='upper right', ncol=3, fontsize=9, **legend_kw)
 fig1.tight_layout()
-fig1.savefig('fig_4A2_comparison.pdf')
-fig1.savefig('fig_4A2_comparison.png')
+fig1.savefig(os.path.join(output_dir, 'fig_4A2_comparison.pdf'))
+fig1.savefig(os.path.join(output_dir, 'fig_4A2_comparison.png'))
 print('已保存: fig_4A2_comparison')
 
 # ═══ 4A3 对比实验 ═══
@@ -79,8 +89,8 @@ ax2.set_ylim([8, 2000])
 ax2.grid(True, alpha=0.3, which='both')
 ax2.legend(loc='upper right', ncol=3, fontsize=9, **legend_kw)
 fig2.tight_layout()
-fig2.savefig('fig_4A3_comparison.pdf')
-fig2.savefig('fig_4A3_comparison.png')
+fig2.savefig(os.path.join(output_dir, 'fig_4A3_comparison.pdf'))
+fig2.savefig(os.path.join(output_dir, 'fig_4A3_comparison.png'))
 print('已保存: fig_4A3_comparison')
 
 # ═══ 4A2 消融实验 ═══
@@ -95,8 +105,8 @@ ax3.set_ylim([0, 350])
 ax3.grid(True, alpha=0.3)
 ax3.legend(loc='upper right', ncol=1, **legend_kw)
 fig3.tight_layout()
-fig3.savefig('fig_4A2_ablation.pdf')
-fig3.savefig('fig_4A2_ablation.png')
+fig3.savefig(os.path.join(output_dir, 'fig_4A2_ablation.pdf'))
+fig3.savefig(os.path.join(output_dir, 'fig_4A2_ablation.png'))
 print('已保存: fig_4A2_ablation')
 
 # ═══ 4A3 消融实验 ═══
@@ -111,8 +121,8 @@ ax4.set_ylim([0, 350])
 ax4.grid(True, alpha=0.3)
 ax4.legend(loc='upper right', ncol=1, **legend_kw)
 fig4.tight_layout()
-fig4.savefig('fig_4A3_ablation.pdf')
-fig4.savefig('fig_4A3_ablation.png')
+fig4.savefig(os.path.join(output_dir, 'fig_4A3_ablation.pdf'))
+fig4.savefig(os.path.join(output_dir, 'fig_4A3_ablation.png'))
 print('已保存: fig_4A3_ablation')
 
 plt.close('all')

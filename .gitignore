@@ -19,9 +19,12 @@ build/
 dist/
 *.egg-info/
 
+# Gate 0 centralized datasets and run artifacts
+data/
+outputs/
+
 # OS and temporary files
 .DS_Store
 Thumbs.db
 *.tmp
 *.log
-

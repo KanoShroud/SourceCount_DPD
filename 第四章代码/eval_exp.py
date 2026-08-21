@@ -17,6 +17,13 @@ import os, argparse
 from scipy.optimize import linear_sum_assignment
 from yolo_config import *
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_dir as runtime_output_dir,
+)
+
 
 def pixel_to_phys(px):
     return px * LAMDA - EDGE
@@ -177,12 +184,13 @@ def main():
     pa.add_argument('--method', type=str, required=True,
                     choices=['dpd_peak', 'tdoa', 'music_dpd',
                              'D1', 'D2', 'D3', 'D3d', 'D4', 'D5', 'D6', 'D6s', 'D7', 'D8'])
-    pa.add_argument('--data_dir', type=str, default='data')
+    pa.add_argument('--data_dir', type=str, default=str(runtime_data_dir()))
     pa.add_argument('--model_path', type=str, default=None)
     pa.add_argument('--device', type=str, default=DEFAULT_DEVICE)
     pa.add_argument('--peak_size', type=int, default=PEAK_SIZE)
-    pa.add_argument('--results_dir', type=str, default='results')
+    pa.add_argument('--results_dir', type=str, default=None)
     args = pa.parse_args()
+    results_dir = args.results_dir or str(runtime_output_dir('eval_exp'))
 
     SAVE_NAME = {
         'dpd_peak':   'DPD_Peak_Search',
@@ -217,7 +225,7 @@ def main():
 
     # 加载 DL 模型
     model = None
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    device = runtime_device(args.device)
 
     if args.method == 'music_dpd':
         from dpd_subspace import set_device
@@ -235,7 +243,9 @@ def main():
                 'D4': 'dualhead_ga', 'D5': 'dualhead', 'D6': 'dualhead_cw',
                 'D6s': 'dualhead_cws', 'D7': 'dualhead_ga_cw', 'D8': 'dualhead_std',
             }
-            args.model_path = f'best_yolo_{save_map[args.method]}.pth'
+            args.model_path = checkpoint_path(
+                'train_yolo', f'best_yolo_{save_map[args.method]}.pth'
+            )
             print(f"  自动推断模型路径: {args.model_path}")
 
         from yolo_model import YOLOv8Loc
@@ -297,7 +307,7 @@ def main():
               f"<10m={metrics['within_10m']:.1%}  <30m={metrics['within_30m']:.1%}  <50m={metrics['within_50m']:.1%}  "
               f"({metrics['n_samples']} samples)", flush=True)
 
-    save_dir = os.path.join(args.results_dir, f'exp_{args.exp}')
+    save_dir = os.path.join(results_dir, f'exp_{args.exp}')
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f'{save_name}.pt')
 

@@ -10,9 +10,9 @@ gen_ch4_loc_data.py — 生成第四章定位数据集
   6. 每 SHARD_SIZE 个任务保存一个 .pt 文件
 
 用法:
-  python gen_ch4_loc_data.py --data_dir /mnt/data/ltzdata_loc --split train
-  python gen_ch4_loc_data.py --data_dir /mnt/data/ltzdata_loc --split val
-  python gen_ch4_loc_data.py --data_dir /mnt/data/ltzdata_loc --split test
+  python gen_ch4_loc_data.py --split train
+  python gen_ch4_loc_data.py --split val
+  python gen_ch4_loc_data.py --split test
 """
 
 import numpy as np
@@ -21,6 +21,12 @@ import torch
 import os
 import argparse
 from dpd_calculator_torch import DPDGeometry, compute_fine_dpd, compute_hyperbola_mask
+
+from chapter_runtime import (
+    DEFAULT_DEVICE,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+)
 
 
 # ═══════════════════════════════════════
@@ -149,10 +155,13 @@ def new_shard_data():
 # ═══════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default='/mnt/data/ltzdata_loc')
+    parser.add_argument('--data_dir', type=str, default=str(runtime_data_dir()),
+                        help='MATLAB IQ 数据目录')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='分片输出根目录；默认按 smoke/formal 模式隔离')
     parser.add_argument('--split', type=str, required=True,
                         choices=['train', 'val', 'test'])
-    parser.add_argument('--device', type=str, default='cuda:2')
+    parser.add_argument('--device', type=str, default=DEFAULT_DEVICE)
     parser.add_argument('--edge', type=float, default=EDGE)
     parser.add_argument('--lamda', type=float, default=LAMDA_FINE)
     parser.add_argument('--shard_size', type=int, default=SHARD_SIZE)
@@ -164,7 +173,8 @@ def main():
                         help='高斯热力图σ（像素）')
     args = parser.parse_args()
 
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    device = runtime_device(args.device)
+    output_dir = args.output_dir or str(runtime_data_dir(create=True))
     print(f"Device: {device}")
     print(f"Fine grid: ±{args.edge}m, step {args.lamda}m")
     print(f"Shard size: {args.shard_size} tasks per file")
@@ -381,19 +391,19 @@ def main():
 
             # 分片满了 → 保存并清空
             if len(shard_data['n_src']) >= args.shard_size:
-                path = save_shard(shard_data, args.data_dir, args.split, shard_idx)
+                path = save_shard(shard_data, output_dir, args.split, shard_idx)
                 shard_files.append(path)
                 shard_data = new_shard_data()
                 shard_idx += 1
 
     # 保存剩余任务
     if len(shard_data['n_src']) > 0:
-        path = save_shard(shard_data, args.data_dir, args.split, shard_idx)
+        path = save_shard(shard_data, output_dir, args.split, shard_idx)
         shard_files.append(path)
         shard_idx += 1
 
     # ── 保存索引文件 ──
-    split_dir = os.path.join(args.data_dir, args.split)
+    split_dir = os.path.join(output_dir, args.split)
     index_path = os.path.join(split_dir, f'loc_{args.split}_index.pt')
     torch.save({
         'shard_files': [os.path.basename(f) for f in shard_files],

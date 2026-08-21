@@ -22,8 +22,14 @@ import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys
 import argparse
+
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_path,
+)
 
 
 BAND_THRESHOLD = 0.50
@@ -246,11 +252,11 @@ def main():
         if a == 'B': tag = 'B'
         elif a.startswith('M') and a[1:].isdigit(): tag += f'_{a}'
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
     # 加载模型
-    model_path = f'best_model_v26_{tag}.pth'
+    model_path = checkpoint_path(f'best_model_v26_{tag}.pth')
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
@@ -262,7 +268,7 @@ def main():
     print(f"Model: {tag} ({cfg['mode']}) max_src={max_src_model}")
 
     # 加载数据
-    data_path = f'/mnt/data/ltzdata/{args.dataset}_data.mat'
+    data_path = runtime_data_dir() / f'{args.dataset}_data.mat'
     print(f"Loading: {data_path}")
     spectra_dl, src_count, band_mask, ignore_mask = load_data(data_path)
     N = len(src_count)
@@ -294,7 +300,11 @@ def main():
         print(f"  样本 #{idx}: {ns}源", end='')
         correct = visualize_sample(
             model, spectra_dl, src_count, band_mask, ignore_mask,
-            idx, device, max_src_model, save_prefix=f'{args.dataset}_')
+            idx,
+            device,
+            max_src_model,
+            save_prefix=str(output_path('vis_prediction', f'{args.dataset}_')),
+        )
         if correct:
             n_correct += 1
         print(f"  {'✓' if correct else '✗'}")
@@ -380,7 +390,7 @@ def main():
         plt.suptitle(f'预测可视化汇总 ({tag}, {args.dataset}集)', fontsize=13)
         plt.tight_layout()
         save_name = f'{args.dataset}_vis_summary_{tag}.png'
-        plt.savefig(save_name, dpi=150, bbox_inches='tight')
+        plt.savefig(output_path('vis_prediction', save_name), dpi=150, bbox_inches='tight')
         print(f"  Saved: {save_name}")
         plt.close()
 

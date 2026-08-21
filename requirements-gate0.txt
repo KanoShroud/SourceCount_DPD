@@ -1,0 +1,7 @@
+# Gate 0 运行基础依赖。PyTorch/torchvision 使用现有 cu129 安装，不在此重装。
+h5py==3.14.0
+ultralytics==8.3.191
+matplotlib==3.10.8
+# Pillow 12.1.1 会在 torchvision 0.23.0+cu129 先加载本地扩展后触发
+# _imaging DLL 冲突；11.3.0 已通过全新进程组合导入验证。
+Pillow==11.3.0

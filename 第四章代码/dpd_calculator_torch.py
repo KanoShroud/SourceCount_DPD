@@ -12,6 +12,8 @@ dpd_calculator_torch.py — PyTorch 版 DPD 空间谱计算 (优化版)
 import torch
 import numpy as np
 
+from chapter_runtime import device as runtime_device
+
 
 # ═══════════════════════════════════════
 #  几何预计算（所有样本共享）
@@ -270,7 +272,7 @@ def compute_fine_dpd_compat(sig_rcv_complex, fs, rcvPos, init_pos, edge, lamda,
     用于 gen_exp_data.py 等不方便预计算的场景
     """
     if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = runtime_device()
 
     if isinstance(sig_rcv_complex, np.ndarray):
         N0 = sig_rcv_complex.shape[1]

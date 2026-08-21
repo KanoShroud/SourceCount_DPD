@@ -7,8 +7,8 @@ train_epn.py — EPN (End-to-end Positioning Network) 适配版
 适配版:   DPD 空间谱 → 2D Conv → ResNet-18 → FC → 坐标回归
 
 用法:
-  训练:   python train_epn.py --device cuda:0 --data_dir /mnt/data/ltzdata_loc
-  评估:   python train_epn.py --eval_exp 4A2 4A3 --device cuda:0 --data_dir /mnt/data/ltzdata_loc
+  训练:   python train_epn.py
+  评估:   python train_epn.py --eval_exp 4A2 4A3
 """
 
 import os, sys, argparse, time
@@ -18,6 +18,14 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from scipy.optimize import linear_sum_assignment
 import torchvision.models as models
+
+from chapter_runtime import (
+    DEFAULT_DEVICE,
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_dir as runtime_output_dir,
+)
 
 # ─── 常量 ───
 COORD_MAX = 2000.0   # 坐标范围 ±2000m
@@ -347,8 +355,10 @@ def eval_experiment(model, device, exp_name, data_dir, results_dir='results'):
 # ═══════════════════════════════════════
 def main():
     pa = argparse.ArgumentParser(description='EPN (ResNet-18) 训练与评估')
-    pa.add_argument('--data_dir', default='data')
-    pa.add_argument('--device', default='cuda:0')
+    pa.add_argument('--data_dir', default=str(runtime_data_dir()))
+    pa.add_argument('--device', default=DEFAULT_DEVICE)
+    pa.add_argument('--output_dir', default=None,
+                    help='权重输出目录；默认按 smoke/formal 模式隔离')
     pa.add_argument('--batch_size', type=int, default=96)
     pa.add_argument('--epochs', type=int, default=200)
     pa.add_argument('--lr', type=float, default=1e-3)
@@ -358,10 +368,13 @@ def main():
     pa.add_argument('--eval_exp', nargs='*', default=None,
                     help='仅评估实验，如: --eval_exp 4A2 4A3')
     pa.add_argument('--model_path', default=None)
-    pa.add_argument('--results_dir', default='results')
+    pa.add_argument('--results_dir', default=None)
     args = pa.parse_args()
 
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    device = runtime_device(args.device)
+    output_dir = args.output_dir or str(runtime_output_dir('train_epn'))
+    results_dir = args.results_dir or os.path.join(output_dir, 'results')
+    os.makedirs(output_dir, exist_ok=True)
 
     # 固定随机种子
     seed = 42
@@ -375,13 +388,13 @@ def main():
     # ─── 仅评估模式 ───
     if args.eval_exp is not None:
         model = EPNResNet(max_src=MAX_SRC, dropout=0.0).to(device)
-        mp = args.model_path or 'best_epn.pth'
+        mp = args.model_path or checkpoint_path('train_epn', 'best_epn.pth')
         ckpt = torch.load(mp, map_location=device, weights_only=False)
         model.load_state_dict(ckpt)
         print(f"  模型已加载: {mp}")
         for exp in args.eval_exp:
             print(f"\n{'='*50}")
-            eval_experiment(model, device, exp, args.data_dir, args.results_dir)
+            eval_experiment(model, device, exp, args.data_dir, results_dir)
         return
 
     # ─── 训练模式 ───
@@ -475,7 +488,7 @@ def main():
         # Best 模型
         if vr['rmse'] < best_rmse:
             best_rmse = vr['rmse']
-            torch.save(model.state_dict(), 'best_epn.pth')
+            torch.save(model.state_dict(), os.path.join(output_dir, 'best_epn.pth'))
             print(f"  ★ Best RMSE={best_rmse:.1f}m "
                   f"(mean={vr['mean_error']:.1f}m med={vr['median_error']:.1f}m "
                   f"<30m={vr['within_30m']:.1f}% <50m={vr['within_50m']:.1f}%)")
@@ -488,7 +501,11 @@ def main():
             break
 
     # 最终评估
-    model.load_state_dict(torch.load('best_epn.pth', map_location=device, weights_only=False))
+    model.load_state_dict(torch.load(
+        os.path.join(output_dir, 'best_epn.pth'),
+        map_location=device,
+        weights_only=False,
+    ))
     print(f"\n===== Final Validation (EPN) =====")
     vr = evaluate(model, val_loader, device)
     for k, v in vr.items():

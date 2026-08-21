@@ -16,6 +16,10 @@ clc; clear; close all;
 tic
 global Txobj Rxobj
 
+script_dir = fileparts(mfilename('fullpath'));
+addpath(script_dir, fileparts(script_dir));
+runtime = gate0_runtime('chapter4', mfilename);
+
 if isempty(gcp('nocreate'))
     parpool('local');
 end
@@ -23,8 +27,12 @@ end
 %% ═══════════════════════════════════════
 %  参数配置区
 %% ═══════════════════════════════════════
-set_list    = {'train', 'val', 'test'};
-trials_list = [40000, 5000, 5000];
+set_list = {'train', 'val', 'test'};
+if runtime.is_smoke
+    trials_list = [2, 1, 1];
+else
+    trials_list = [40000, 5000, 5000];
+end
 
 fc          = 5800e6;
 arfa_V      = 0.25;
@@ -482,7 +490,7 @@ for si = 1:length(set_list)
     fprintf('耗时 %.1f 秒\n', toc(t_start));
 
     %% ── 保存 ──
-    save_file = sprintf('%s_data.mat', set_name);
+    save_file = fullfile(runtime.data_dir, sprintf('%s_data.mat', set_name));
     fprintf('正在保存 %s ...\n', save_file);
 
     save(save_file, ...

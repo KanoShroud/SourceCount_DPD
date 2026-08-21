@@ -5,7 +5,16 @@ plot_4C.py — 生成实验 4C 的 RMSE 曲线图（论文用）
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import numpy as np
+import argparse
+import os
+
+from chapter_runtime import output_dir as runtime_output_dir
+
+parser = argparse.ArgumentParser(description='绘制第四章实验 4C 图')
+parser.add_argument('--output_dir', default=None)
+args = parser.parse_args()
+output_dir = args.output_dir or str(runtime_output_dir('plot_4C'))
+os.makedirs(output_dir, exist_ok=True)
 
 plt.rcParams.update({
     'font.family': 'serif', 'font.serif': ['Times New Roman'],
@@ -44,7 +53,7 @@ ax1.set_ylim([8, 300])
 ax1.grid(True, alpha=0.3, which='both')
 ax1.legend(loc='upper right', ncol=3, fontsize=9, **legend_kw)
 fig1.tight_layout()
-fig1.savefig('fig_4C_comparison.png')
+fig1.savefig(os.path.join(output_dir, 'fig_4C_comparison.png'))
 print('已保存: fig_4C_comparison')
 
 # ═══ 4C 消融实验 ═══
@@ -59,7 +68,7 @@ ax2.set_ylim([0, 45])
 ax2.grid(True, alpha=0.3)
 ax2.legend(loc='upper right', ncol=1, **legend_kw)
 fig2.tight_layout()
-fig2.savefig('fig_4C_ablation.png')
+fig2.savefig(os.path.join(output_dir, 'fig_4C_ablation.png'))
 print('已保存: fig_4C_ablation')
 
 plt.close('all')

@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from chapter_runtime import checkpoint_path, data_dir as runtime_data_dir, device as runtime_device
+
 BAND_THRESHOLD = 0.50
 
 
@@ -112,10 +114,10 @@ def main():
     if max_src_override:
         tag += f'_M{max_src_override}'
 
-    mat_path = f'/mnt/data/ltzdata/{dataset}_data.mat'
-    model_path = f'best_model_v26_{tag}.pth'
+    mat_path = runtime_data_dir() / f'{dataset}_data.mat'
+    model_path = checkpoint_path(f'best_model_v26_{tag}.pth')
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
 
     # ── 只加载第idx个样本（切片读取，不加载整个文件）──
     with h5py.File(mat_path, 'r') as f:

@@ -10,6 +10,10 @@ clc; clear; close all;
 tic
 global Txobj Rxobj
 
+script_dir = fileparts(mfilename('fullpath'));
+addpath(script_dir, fileparts(script_dir));
+runtime = gate0_runtime('chapter4', mfilename);
+
 if isempty(gcp('nocreate')), parpool('local'); end
 
 %% ── 系统参数 ──
@@ -53,7 +57,11 @@ dataLen = calc_dataLen(len, fs, symbolRate);
 
 %% ── 实验配置 ──
 snr_range_dB     = -10:2:10;
-n_trials_per_snr = 5000;
+if runtime.is_smoke
+    n_trials_per_snr = 1;
+else
+    n_trials_per_snr = 5000;
+end
 src_distance     = 800;
 src_azimuths     = [30, 150, 330];
 exp_list         = {'4A2', '4A3'};
@@ -172,7 +180,7 @@ for exp_idx = 1:length(exp_list)
     fprintf('\n===== %s 完毕 (%d样本, %.1fs) =====\n', exp_name, N_total, toc(t_start));
 
     % ── 保存 ──
-    save_file = sprintf('exp_snr_%s.mat', exp_name);
+    save_file = fullfile(runtime.data_dir, sprintf('exp_snr_%s.mat', exp_name));
     rcv_pos_val = single(rcvPos); BW_actual_val = single(BW_actual);
     N_power_W_val = single(N_power_W); N_power_dBm_val = single(N_power_dBm);
     exp_n_src_val = int32(n_src); exp_snr_range_val = single(snr_range_dB);

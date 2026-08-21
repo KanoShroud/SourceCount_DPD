@@ -18,6 +18,12 @@ import torch.nn.functional as F
 import time
 import sys
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+)
+
 
 # ═══════════════════════════════════════
 #  系统参数
@@ -141,11 +147,11 @@ def main():
         if a == 'B': tag = 'B'
         elif a.startswith('M') and a[1:].isdigit(): tag += f'_{a}'
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
     # ── 加载模型 ──
-    model_path = f'best_model_v26_{tag}.pth'
+    model_path = checkpoint_path(f'best_model_v26_{tag}.pth')
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
@@ -156,7 +162,7 @@ def main():
     print(f"Model: {tag} ({cfg.get('mode','concat')}) max_src={cfg['max_src']}")
 
     # ── 加载测试数据 ──
-    test_path = '/mnt/data/ltzdata/test_data.mat'
+    test_path = runtime_data_dir() / 'test_data.mat'
     print(f"Loading: {test_path}")
     with h5py.File(test_path, 'r') as f:
         spectra_raw = np.array(f['mtr_sub_all'], dtype=np.float32)

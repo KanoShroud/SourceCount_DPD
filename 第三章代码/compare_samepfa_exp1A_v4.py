@@ -22,6 +22,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import sys
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_path,
+)
+
 
 # ═══════════════════════════════════════
 #  系统参数
@@ -316,10 +323,10 @@ def main():
         if a == 'B': tag = 'B'
         elif a.startswith('M') and a[1:].isdigit(): tag += f'_{a}'
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
-    ckpt = torch.load(f'best_model_v26_{tag}.pth', map_location=device,
+    ckpt = torch.load(checkpoint_path(f'best_model_v26_{tag}.pth'), map_location=device,
                        weights_only=False)
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
@@ -329,11 +336,11 @@ def main():
     print(f"Model: {tag} ({cfg['mode']}) max_src={cfg['max_src']}")
 
     print(f"\n--- Threshold calibration (all methods, Pfa=0.01) ---")
-    val_path = '/mnt/data/ltzdata/val_data.mat'
+    val_path = runtime_data_dir() / 'val_data.mat'
     thresholds = calibrate_all_thresholds(val_path, model, device, target_pfa=0.01)
 
     print(f"\n--- Loading Exp 1-A data ---")
-    exp_path = '/mnt/data/ltzdata/ctrl_exp1A.mat'
+    exp_path = runtime_data_dir() / 'ctrl_exp1A.mat'
     spectra_dl, sub_energy, cov_mat, snr_target, Pt_target, band_true, band_ignore = load_exp1a(exp_path)
     N = len(snr_target)
     print(f"  {N} samples, {band_ignore.sum()} ignore positions total")
@@ -435,7 +442,7 @@ def main():
                  fontsize=14)
     plt.tight_layout()
     save_name = f'exp1A_metrics_{tag}.png'
-    plt.savefig(save_name, dpi=150)
+    plt.savefig(output_path('compare_samepfa_exp1A_v4', save_name), dpi=150)
     print(f"\nFigure saved: {save_name}")
     plt.close()
     print("Done!")

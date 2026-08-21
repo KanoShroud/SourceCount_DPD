@@ -24,6 +24,13 @@ import matplotlib.patches as patches
 from matplotlib.colors import LinearSegmentedColormap
 import argparse
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_path,
+)
+
 
 # ═══════════════════════════════════════
 #  模型定义
@@ -146,11 +153,15 @@ def main():
         elif a == 'B': tag = 'B'
         elif a.startswith('M') and a[1:].isdigit(): tag += f'_{a}'
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
     # ── 加载模型 ──
-    ckpt = torch.load(f'best_model_v26_{tag}.pth', map_location=device, weights_only=False)
+    ckpt = torch.load(
+        checkpoint_path(f'best_model_v26_{tag}.pth'),
+        map_location=device,
+        weights_only=False,
+    )
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
         n_sub=cfg['N_sub'], max_src=cfg['max_src'],
@@ -160,7 +171,7 @@ def main():
     print(f"Model: {tag} ({cfg['mode']}) max_src={cfg['max_src']}")
 
     # ── 加载数据 ──
-    test_path = '/mnt/data/ltzdata/test_data.mat'
+    test_path = runtime_data_dir() / 'test_data.mat'
     with h5py.File(test_path, 'r') as f:
         spectra_raw = np.array(f['mtr_sub_all'], dtype=np.float32).transpose(3, 2, 1, 0)
         src_count = np.array(f['src_count_all'], dtype=np.int64).flatten()
@@ -317,7 +328,7 @@ def main():
     plt.subplots_adjust(top=0.92, bottom=0.10, hspace=0.35, wspace=0.15)
 
     save_name = f'feature_act_{args.layer}_sample{sample_idx}_{tag}.png'
-    plt.savefig(save_name, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path('vis_feature_activation', save_name), dpi=150, bbox_inches='tight')
     print(f"\nFigure saved: {save_name}")
     plt.close()
     print("Done!")

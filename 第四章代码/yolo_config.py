@@ -2,6 +2,8 @@
 yolo_config.py — YOLOv8 定位系统配置参数
 """
 
+from chapter_runtime import DEFAULT_DEVICE as RUNTIME_DEFAULT_DEVICE
+
 # ═══════════════════════════════════════
 #  系统参数
 # ═══════════════════════════════════════
@@ -52,4 +54,4 @@ DEFAULT_EPOCHS    = 200
 DEFAULT_BATCH     = 192
 DEFAULT_LR        = 1e-3
 DEFAULT_PATIENCE  = 30
-DEFAULT_DEVICE    = 'cuda:2'
+DEFAULT_DEVICE    = RUNTIME_DEFAULT_DEVICE

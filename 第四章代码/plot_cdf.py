@@ -6,9 +6,9 @@ plot_cdf.py — 生成对比实验和消融实验的CDF曲线图（分开出图�
 消融CDF (放4.3.2): YOLOv8, Proposed Net — 横轴0-50m
 
 用法:
-  python plot_cdf.py --device cuda:2 --data_dir /mnt/data/ltzdata_loc
-  python plot_cdf.py --device cuda:2 --data_dir /mnt/data/ltzdata_loc --exp 4A3
-  python plot_cdf.py --device cuda:2 --data_dir /mnt/data/ltzdata_loc --snr_list -6 0 6
+  python plot_cdf.py
+  python plot_cdf.py --exp 4A3
+  python plot_cdf.py --snr_list -6 0 6
 """
 
 import os, argparse, torch, numpy as np
@@ -17,6 +17,13 @@ from eval_exp import (eval_dpd_peak, eval_dl_method, hungarian_match_eval,
                        load_exp_data)
 from yolo_config import *
 from train_epn import EPNResNet, COORD_MAX, MAX_SRC
+
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_dir as runtime_output_dir,
+)
 
 import matplotlib
 matplotlib.use('Agg')
@@ -68,7 +75,7 @@ def collect_errors(method_name, model, fine_dpd, pos_label, n_src_all,
 
 
 def plot_single_cdf(errors_dict, method_keys, styles, snr_val, exp_name,
-                    tag, max_x):
+                    tag, max_x, output_dir):
     fig, ax = plt.subplots(figsize=(5.5, 4))
 
     for method_name in method_keys:
@@ -90,16 +97,19 @@ def plot_single_cdf(errors_dict, method_keys, styles, snr_val, exp_name,
 
     fig.tight_layout()
     fname = f'fig_{exp_name}_cdf_{tag}_snr{snr_val:+d}dB'
-    fig.savefig(f'{fname}.png')
-    fig.savefig(f'{fname}.pdf')
-    print(f'  已保存: {fname}.png')
+    png_path = os.path.join(output_dir, f'{fname}.png')
+    pdf_path = os.path.join(output_dir, f'{fname}.pdf')
+    fig.savefig(png_path)
+    fig.savefig(pdf_path)
+    print(f'  已保存: {png_path}')
     plt.close(fig)
 
 
 def main():
     pa = argparse.ArgumentParser()
-    pa.add_argument('--device', default='cuda:0')
-    pa.add_argument('--data_dir', required=True)
+    pa.add_argument('--device', default=DEFAULT_DEVICE)
+    pa.add_argument('--data_dir', default=str(runtime_data_dir()))
+    pa.add_argument('--output_dir', default=None)
     pa.add_argument('--peak_size', type=int, default=PEAK_SIZE)
     pa.add_argument('--exp', default='4A2', choices=['4A2', '4A3'])
     pa.add_argument('--snr_list', nargs='+', type=int, default=[-6, 0, 6])
@@ -108,26 +118,40 @@ def main():
     pa.add_argument('--ablation_max_x', type=float, default=50,
                     help='消融CDF横轴上限 (m)')
     args = pa.parse_args()
-    device = torch.device(args.device)
+    device = runtime_device(args.device)
+    output_dir = args.output_dir or str(runtime_output_dir('plot_cdf'))
+    os.makedirs(output_dir, exist_ok=True)
 
     # ── 加载模型 ──
     print("加载模型...")
     from yolo_model import YOLOv8Loc
 
     model_d1 = YOLOv8Loc(method='bbox').to(device)
-    ckpt = torch.load('best_yolo_bbox.pth', map_location=device, weights_only=False)
+    ckpt = torch.load(
+        checkpoint_path('train_yolo', 'best_yolo_bbox.pth'),
+        map_location=device,
+        weights_only=False,
+    )
     model_d1.load_state_dict(ckpt['model'])
     model_d1.eval()
     print("  D1 (YOLOv8) loaded")
 
     model_d8 = YOLOv8Loc(method='dualhead').to(device)
-    ckpt = torch.load('best_yolo_dualhead_std.pth', map_location=device, weights_only=False)
+    ckpt = torch.load(
+        checkpoint_path('train_yolo', 'best_yolo_dualhead_std.pth'),
+        map_location=device,
+        weights_only=False,
+    )
     model_d8.load_state_dict(ckpt['model'])
     model_d8.eval()
     print("  D8 (Proposed Net) loaded")
 
     model_epn = EPNResNet(max_src=MAX_SRC, dropout=0.0).to(device)
-    ckpt = torch.load('best_epn.pth', map_location=device, weights_only=False)
+    ckpt = torch.load(
+        checkpoint_path('train_epn', 'best_epn.pth'),
+        map_location=device,
+        weights_only=False,
+    )
     model_epn.load_state_dict(ckpt)
     model_epn.eval()
     print("  EPN loaded")
@@ -166,7 +190,7 @@ def main():
         snr_file_map[int(pval)] = pfile
 
     # ── 日志文件 ──
-    log_path = f'cdf_log_{args.exp}.txt'
+    log_path = os.path.join(output_dir, f'cdf_log_{args.exp}.txt')
     log_f = open(log_path, 'w', encoding='utf-8')
 
     def log(msg=''):
@@ -261,13 +285,13 @@ def main():
         log(f"  [对比CDF] max_x={args.comparison_max_x}m")
         plot_single_cdf(errors_dict, comparison_keys, styles,
                         snr_val, args.exp, 'comparison',
-                        max_x=args.comparison_max_x)
+                        max_x=args.comparison_max_x, output_dir=output_dir)
 
         # 消融CDF
         log(f"  [消融CDF] max_x={args.ablation_max_x}m")
         plot_single_cdf(errors_dict, ablation_keys, styles,
                         snr_val, args.exp, 'ablation',
-                        max_x=args.ablation_max_x)
+                        max_x=args.ablation_max_x, output_dir=output_dir)
 
         log()
 

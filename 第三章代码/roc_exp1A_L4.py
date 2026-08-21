@@ -24,6 +24,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import sys
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_path,
+)
+
 
 # ═══════════════════════════════════════
 #  系统参数
@@ -247,10 +254,14 @@ def main():
         if a == 'B': tag = 'B'
         elif a.startswith('M') and a[1:].isdigit(): tag += f'_{a}'
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
-    ckpt = torch.load(f'best_model_v26_{tag}.pth', map_location=device, weights_only=False)
+    ckpt = torch.load(
+        checkpoint_path(f'best_model_v26_{tag}.pth'),
+        map_location=device,
+        weights_only=False,
+    )
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
         n_sub=cfg['N_sub'], max_src=cfg['max_src'],
@@ -258,8 +269,8 @@ def main():
     model.load_state_dict(ckpt['model']); model.eval()
     print(f"Model: {tag} ({cfg['mode']}) max_src={cfg['max_src']}")
 
-    val_path = '/mnt/data/ltzdata/val_data.mat'
-    exp_path = '/mnt/data/ltzdata/ctrl_exp1A.mat'
+    val_path = runtime_data_dir() / 'val_data.mat'
+    exp_path = runtime_data_dir() / 'ctrl_exp1A.mat'
 
     # ── 加载H0 ──
     print("\nLoading H0 (val 0-source)...")
@@ -353,7 +364,7 @@ def main():
     plt.suptitle('Exp 1-A: Level 4 (Exact Match) ROC Curves', fontsize=14)
     plt.tight_layout()
     save_name = f'roc_exp1A_L4_{tag}.png'
-    plt.savefig(save_name, dpi=150)
+    plt.savefig(output_path('roc_exp1A_L4', save_name), dpi=150)
     print(f"\nFigure saved: {save_name}")
     plt.close()
     print("Done!")

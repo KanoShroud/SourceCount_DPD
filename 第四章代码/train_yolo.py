@@ -39,6 +39,12 @@ from yolo_model import (
     nms_heatmap, extract_peaks_topn, decode_bbox_topn, pixel_to_phys,
 )
 
+from chapter_runtime import (
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_dir as runtime_output_dir,
+)
+
 
 # ═══════════════════════════════════════
 #  数据集
@@ -483,7 +489,9 @@ def evaluate(model, loader, device, method, peak_size=PEAK_SIZE, full_metrics=Tr
 # ═══════════════════════════════════════
 def main():
     pa = argparse.ArgumentParser()
-    pa.add_argument('--data_dir', type=str, default='data')
+    pa.add_argument('--data_dir', type=str, default=str(runtime_data_dir()))
+    pa.add_argument('--output_dir', type=str, default=None,
+                    help='权重和训练曲线目录；默认按 smoke/formal 模式隔离')
     pa.add_argument('--method', type=str, required=True,
                     choices=['bbox', 'gauss', 'distfield', 'dualhead', 'distfield_dual'])
     pa.add_argument('--device', type=str, default=DEFAULT_DEVICE)
@@ -519,7 +527,9 @@ def main():
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    device = runtime_device(args.device)
+    output_dir = args.output_dir or str(runtime_output_dir('train_yolo'))
+    os.makedirs(output_dir, exist_ok=True)
     print(f"Device: {device}")
     print(f"Method: {args.method}")
     print(f"Peak/NMS size: {args.peak_size}, Box size: {args.box_size}")
@@ -713,8 +723,10 @@ def main():
             best_st = copy.deepcopy(model.state_dict()); no_imp = 0
             print(f"  ★ Best RMSE={best_rmse:.1f}m (mean={vr['mean_error']:.1f}m "
                   f"med={vr['median_error']:.1f}m <30m={vr['within_30m']:.1%} <50m={vr['within_50m']:.1%})")
-            torch.save({'model': best_st, 'method': args.method, 'best_rmse': best_rmse},
-                       f'best_yolo_{save_tag}.pth')
+            torch.save(
+                {'model': best_st, 'method': args.method, 'best_rmse': best_rmse},
+                os.path.join(output_dir, f'best_yolo_{save_tag}.pth'),
+            )
         elif do_full:
             no_imp += 1
         if no_imp >= args.patience:
@@ -734,8 +746,9 @@ def main():
     ax[1].set_title('Val Error (m)'); ax[1].legend(); ax[1].grid(True)
     ax[2].plot(ep_metric, [v*100 for v in hist['v50']], 'g-o', markersize=3)
     ax[2].set_title('Val <50m (%)'); ax[2].grid(True)
-    plt.tight_layout(); plt.savefig(f'training_curves_{save_tag}.png', dpi=120)
-    print(f"Curves saved: training_curves_{save_tag}.png")
+    curves_path = os.path.join(output_dir, f'training_curves_{save_tag}.png')
+    plt.tight_layout(); plt.savefig(curves_path, dpi=120)
+    print(f"Curves saved: {curves_path}")
 
     if best_st is not None: model.load_state_dict(best_st)
     print(f"\n===== Final Validation ({save_tag}) =====")

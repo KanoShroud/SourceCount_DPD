@@ -35,6 +35,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import sys
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_path,
+)
+
 # ═══════════════════════════════════════
 #  系统参数
 # ═══════════════════════════════════════
@@ -355,11 +362,11 @@ def main():
         elif a.startswith('M') and a[1:].isdigit():
             tag += f'_{a}'
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
     # ── 加载模型 ──
-    ckpt = torch.load(f'best_model_v26_{tag}.pth', map_location=device,
+    ckpt = torch.load(checkpoint_path(f'best_model_v26_{tag}.pth'), map_location=device,
                       weights_only=False)
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
@@ -372,12 +379,12 @@ def main():
 
     # ── 传统方法阈值校准 ──
     print(f"\n--- Traditional threshold calibration (Pfa=0.01) ---")
-    val_path = '/mnt/data/ltzdata/val_data.mat'
+    val_path = runtime_data_dir() / 'val_data.mat'
     thresholds = calibrate_traditional_thresholds(val_path, target_pfa=0.01)
 
     # ── 加载 Exp2B 数据 ──
     print(f"\n--- Loading Exp 2-B data ---")
-    exp_path = '/mnt/data/ltzdata/ctrl_exp2B.mat'
+    exp_path = runtime_data_dir() / 'ctrl_exp2B.mat'
     (spectra_dl, cov_mat, delta_f_all,
      sample_count_true, subband_count_true, ignore_any, target_snr) = load_exp2b(exp_path)
     N = len(delta_f_all)
@@ -504,7 +511,7 @@ def main():
                  fontsize=13)
     plt.tight_layout()
     save_name = f'exp2B_metrics_{tag}.png'
-    plt.savefig(save_name, dpi=150)
+    plt.savefig(output_path('compare_exp2B', save_name), dpi=150)
     print(f"\nFigure saved: {save_name}")
     plt.close()
     print("Done!")

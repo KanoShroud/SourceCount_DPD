@@ -20,7 +20,6 @@ Loss：
   python train_v26.py test B M10 → 测试方案B，max_src=10
 """
 
-import os
 import sys
 import numpy as np
 import h5py
@@ -30,7 +29,14 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import confusion_matrix, classification_report
 import matplotlib.pyplot as plt
-import math
+
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_path,
+    summary as runtime_summary,
+)
 
 BAND_THRESHOLD = 0.5
 
@@ -457,7 +463,7 @@ def full_evaluation(model, loader, device, save_prefix='test'):
 #  训练
 # ═══════════════════════════════════════
 def train(mode='concat', max_src_override=None):
-    data_dir = '/mnt/data/ltzdata'
+    data_dir = runtime_data_dir()
     max_epochs = 100
     batch_size = 64
     base_lr = 1e-3
@@ -465,21 +471,22 @@ def train(mode='concat', max_src_override=None):
     warmup_epochs = 5
     patience = 25
     gamma = 2.0
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
 
     tag = 'B' if mode == 'transformer' else 'A'
     if max_src_override:
         tag += f'_M{max_src_override}'
     print(f"Device: {device}")
+    print(runtime_summary('train_v26'))
     print(f"Scheme {tag}: mode={mode}  gamma={gamma}  max_src_override={max_src_override}")
 
     # ── 数据 ──
     train_set = SourceDetectionDataset(
-        os.path.join(data_dir, 'train_data.mat'),
+        data_dir / 'train_data.mat',
         augment=True, normalize='sample_zscore',
         max_src_override=max_src_override)
     val_set = SourceDetectionDataset(
-        os.path.join(data_dir, 'val_data.mat'),
+        data_dir / 'val_data.mat',
         augment=False, normalize='sample_zscore',
         max_src_override=max_src_override)
 
@@ -582,7 +589,7 @@ def train(mode='concat', max_src_override=None):
                     'N_sub': N_sub, 'max_src': max_src,
                     'gamma': gamma, 'mode': mode,
                 },
-            }, f'best_model_v26_{tag}.pth')
+            }, checkpoint_path(f'best_model_v26_{tag}.pth'))
             print(f"  ★ Saved best model val_loss={val_metrics['loss']:.4f} "
                   f"count={val_metrics['count_acc']:.1%} "
                   f"band={val_metrics['band_acc']:.1%}")
@@ -625,14 +632,19 @@ def train(mode='concat', max_src_override=None):
     axes[3].grid(True)
 
     plt.tight_layout()
-    plt.savefig(f'training_curves_v26_{tag}.png', dpi=150)
+    plt.savefig(output_path('train_v26', f'training_curves_v26_{tag}.png'), dpi=150)
     plt.close()
 
     # ── 验证集评估 ──
-    ckpt = torch.load(f'best_model_v26_{tag}.pth', weights_only=False)
+    ckpt = torch.load(checkpoint_path(f'best_model_v26_{tag}.pth'), weights_only=False)
     model.load_state_dict(ckpt['model'])
     print(f"\n===== Scheme {tag} Validation Evaluation =====")
-    full_evaluation(model, val_loader, device, save_prefix=f'val_{tag}')
+    full_evaluation(
+        model,
+        val_loader,
+        device,
+        save_prefix=str(output_path('train_v26', f'val_{tag}')),
+    )
     print(f"\nDone! Scheme {tag}({mode}) best val_loss={best_val_loss:.4f}")
 
 
@@ -640,19 +652,23 @@ def train(mode='concat', max_src_override=None):
 #  测试
 # ═══════════════════════════════════════
 def test(mode='concat', max_src_override=None):
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     tag = 'B' if mode == 'transformer' else 'A'
     if max_src_override:
         tag += f'_M{max_src_override}'
 
     test_set = SourceDetectionDataset(
-        os.path.join('/mnt/data/ltzdata', 'test_data.mat'),
+        runtime_data_dir() / 'test_data.mat',
         normalize='sample_zscore',
         max_src_override=max_src_override)
     test_loader = DataLoader(test_set, batch_size=64, shuffle=False,
                              num_workers=4, pin_memory=True)
 
-    ckpt = torch.load(f'best_model_v26_{tag}.pth', map_location=device, weights_only=False)
+    ckpt = torch.load(
+        checkpoint_path(f'best_model_v26_{tag}.pth'),
+        map_location=device,
+        weights_only=False,
+    )
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
         n_sub=cfg['N_sub'], max_src=cfg['max_src'],
@@ -669,7 +685,12 @@ def test(mode='concat', max_src_override=None):
     for c, a in metrics['count_class_acc'].items():
         print(f"  {c}src: {a:.1%}" if a >= 0 else f"  {c}src: N/A")
 
-    full_evaluation(model, test_loader, device, save_prefix=f'test_{tag}')
+    full_evaluation(
+        model,
+        test_loader,
+        device,
+        save_prefix=str(output_path('train_v26', f'test_{tag}')),
+    )
 
 
 if __name__ == '__main__':

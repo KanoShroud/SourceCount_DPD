@@ -23,8 +23,8 @@ gen_exp_data.py — 处理控制变量实验数据
     param_value:       标量，当前参数值（SNR dB 或 距离 m）
 
 用法:
-  python gen_exp_data.py --exp 4A1 --data_dir /mnt/data/ltzdata_loc/exp
-  python gen_exp_data.py --exp 4B2 --data_dir /mnt/data/ltzdata_loc/exp
+  python gen_exp_data.py --exp 4A1
+  python gen_exp_data.py --exp 4B2
 """
 
 import numpy as np
@@ -33,6 +33,12 @@ import torch
 import os
 import argparse
 from dpd_calculator_torch import DPDGeometry, compute_fine_dpd, compute_hyperbola_mask
+
+from chapter_runtime import (
+    DEFAULT_DEVICE,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+)
 
 
 # ═══════════════════════════════════════
@@ -156,14 +162,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp', type=str, required=True,
                         help='实验名称: 4A2/4A3/4B2/4B3/4C/4D')
-    parser.add_argument('--data_dir', type=str, default='/mnt/data/ltzdata_loc')
-    parser.add_argument('--device', type=str, default='cuda:2')
+    parser.add_argument('--data_dir', type=str, default=str(runtime_data_dir()),
+                        help='控制实验 MATLAB 数据目录')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='处理后实验数据根目录；默认按 smoke/formal 模式隔离')
+    parser.add_argument('--device', type=str, default=DEFAULT_DEVICE)
     parser.add_argument('--hyp_sigma', type=float, default=HYP_SIGMA_M)
     parser.add_argument('--gauss_sigma', type=float, default=GAUSS_SIGMA_PX)
     args = parser.parse_args()
 
     exp_type, exp_sub = parse_exp_name(args.exp)
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    device = runtime_device(args.device)
+    output_data_dir = args.output_dir or str(runtime_data_dir(create=True))
 
     # ── 确定 mat 文件路径 ──
     mat_file_map = {'snr': 'snr', 'dist': 'dist', 'sep': 'sep', 'bw': 'bw'}
@@ -233,7 +243,7 @@ def main():
 
     # ── 输出目录 ──
     out_dir_map = {'snr': 'exp_4A', 'dist': 'exp_4B', 'sep': 'exp_4C', 'bw': 'exp_4D'}
-    out_dir = os.path.join(args.data_dir, 'exp', out_dir_map[exp_type])
+    out_dir = os.path.join(output_data_dir, 'exp', out_dir_map[exp_type])
     os.makedirs(out_dir, exist_ok=True)
     print(f"输出目录: {out_dir}")
 

@@ -13,6 +13,10 @@ clc; clear; close all;
 tic
 global Txobj Rxobj
 
+script_dir = fileparts(mfilename('fullpath'));
+addpath(script_dir, fileparts(script_dir));
+runtime = gate0_runtime('chapter3', mfilename);
+
 if isempty(gcp('nocreate'))
     parpool('local');
 end
@@ -93,7 +97,11 @@ num_count_classes = int32(max_src + 1);
 %% ═══════════════════════════════════════
 %  Exp 1-A 实验参数
 %% ═══════════════════════════════════════
-n_per_point = 1000;
+if runtime.is_smoke
+    n_per_point = 1;
+else
+    n_per_point = 1000;
+end
 
 % 固定信源位置
 src_pos_fixed = [1600, 700];
@@ -275,7 +283,7 @@ fprintf('\n生成完成！%d样本 | 总耗时 %.1f秒\n', N_total, toc(t_start)
 %% ═══════════════════════════════════════
 %  保存
 %% ═══════════════════════════════════════
-save('ctrl_exp1A.mat', ...
+save(fullfile(runtime.data_dir, 'ctrl_exp1A.mat'), ...
     'mtr_sub_all', 'src_count_all', 'band_mask_all', 'ignore_mask_all', ...
     'avg_snr_all', 'sub_energy_all', 'cov_mat_real_all', 'cov_mat_imag_all', ...
     'Pt_target_all', 'snr_target_all', ...

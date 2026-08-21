@@ -16,6 +16,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+)
+
 BAND_THRESHOLD = 0.50
 
 
@@ -167,10 +173,10 @@ def evaluate_model(model, spectra_dl, src_count_true, band_mask_true,
 #  主函数
 # ═══════════════════════════════════════
 def main():
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
-    test_path = '/mnt/data/ltzdata/test_data.mat'
+    test_path = runtime_data_dir() / 'test_data.mat'
     print(f"Loading test set: {test_path}")
     spectra_dl, src_count, band_mask, ignore_mask, N_sub, max_src_data = load_test_data(test_path)
     print(f"  {len(src_count)} samples, N_sub={N_sub}")
@@ -179,10 +185,10 @@ def main():
 
     # 四个模型配置
     configs = [
-        ('A_M3',  'best_model_v26_A.pth'),
-        ('A_M10', 'best_model_v26_A_M10.pth'),
-        ('B_M3',  'best_model_v26_B_M3.pth'),
-        ('B_M10', 'best_model_v26_B_M10.pth'),
+        ('A_M3',  checkpoint_path('best_model_v26_A.pth')),
+        ('A_M10', checkpoint_path('best_model_v26_A_M10.pth')),
+        ('B_M3',  checkpoint_path('best_model_v26_B_M3.pth')),
+        ('B_M10', checkpoint_path('best_model_v26_B_M10.pth')),
     ]
 
     results = []

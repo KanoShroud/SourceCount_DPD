@@ -18,6 +18,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import sys
 
+from chapter_runtime import (
+    checkpoint_path,
+    data_dir as runtime_data_dir,
+    device as runtime_device,
+    output_path,
+)
+
 
 THRESHOLD_RANGE = np.arange(0.05, 0.96, 0.025)
 
@@ -89,11 +96,11 @@ def main():
         if a == 'B': tag = 'B'
         elif a.startswith('M') and a[1:].isdigit(): tag += f'_{a}'
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = runtime_device()
     print(f"Device: {device}")
 
     # ── 加载模型 ──
-    model_path = f'best_model_v26_{tag}.pth'
+    model_path = checkpoint_path(f'best_model_v26_{tag}.pth')
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
     cfg = ckpt['cfg']
     model = SourceDetectionNet(
@@ -105,7 +112,7 @@ def main():
     print(f"Model: {tag} ({cfg.get('mode','concat')}) max_src={max_src_model}")
 
     # ── 加载验证集 ──
-    val_path = '/mnt/data/ltzdata/val_data.mat'
+    val_path = runtime_data_dir() / 'val_data.mat'
     print(f"Loading: {val_path}")
     with h5py.File(val_path, 'r') as f:
         spectra_raw = np.array(f['mtr_sub_all'], dtype=np.float32)
@@ -229,7 +236,7 @@ def main():
 
     plt.tight_layout()
     save_name = f'threshold_sensitivity_{tag}.png'
-    plt.savefig(save_name, dpi=150)
+    plt.savefig(output_path('eval_threshold_sensitivity', save_name), dpi=150)
     print(f"\nFigure saved: {save_name}")
     plt.close()
 
@@ -251,7 +258,7 @@ def main():
 
     plt.tight_layout()
     save_name2 = f'threshold_by_srccount_{tag}.png'
-    plt.savefig(save_name2, dpi=150)
+    plt.savefig(output_path('eval_threshold_sensitivity', save_name2), dpi=150)
     print(f"Figure saved: {save_name2}")
     plt.close()
 
