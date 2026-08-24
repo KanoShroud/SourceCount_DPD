@@ -665,6 +665,8 @@ def main():
                     help='Gate 3 D8 固定配置强校验，不改变训练算法')
     pa.add_argument('--gate3b_d8', action='store_true', default=False,
                     help='Gate 3B D8 60 epoch 固定配置强校验，不改变训练算法')
+    pa.add_argument('--s2g2_d8', action='store_true', default=False,
+                    help='S2-G2 D8 200 epoch 诊断配置强校验，不改变训练算法')
     pa.add_argument('--run_label', type=str, default='')
     args = pa.parse_args()
     if args.batch_size <= 0:
@@ -676,7 +678,7 @@ def main():
     if args.seed < 0:
         pa.error('--seed 必须为非负整数')
 
-    if args.gate3_d8 or args.gate3b_d8:
+    if args.gate3_d8 or args.gate3b_d8 or args.s2g2_d8:
         gate3_checks = {
             'method=dualhead': args.method == 'dualhead',
             'amp=False': not args.amp,
@@ -709,6 +711,20 @@ def main():
         failed = [name for name, passed in gate3b_checks.items() if not passed]
         if failed:
             pa.error('Gate 3B D8 参数不符合冻结配置: ' + ', '.join(failed))
+    if args.s2g2_d8:
+        s2g2_checks = {
+            'epochs=200': args.epochs == 200,
+            'patience=200': args.patience == 200,
+            'seed=42': args.seed == 42,
+            'device=cuda:0': args.device == 'cuda:0',
+            'peak_size=9': args.peak_size == 9,
+            'box_size=9': args.box_size == 9,
+            'gate3_d8=False': not args.gate3_d8,
+            'gate3b_d8=False': not args.gate3b_d8,
+        }
+        failed = [name for name, passed in s2g2_checks.items() if not passed]
+        if failed:
+            pa.error('S2-G2 D8 参数不符合冻结配置: ' + ', '.join(failed))
 
     configure_reproducibility(args.seed, args.deterministic)
 
@@ -777,7 +793,7 @@ def main():
     write_json(output_dir / 'run_config.json', {
         'status': 'CONFIGURED',
         'run_label': args.run_label,
-        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8) else save_tag,
+        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8 or args.s2g2_d8) else save_tag,
         'args': vars(args),
         'environment': environment,
         'performance_interpretation_allowed': False,
@@ -811,7 +827,7 @@ def main():
 
     initial_validation_path = None
     initial_validation = None
-    if args.gate3b_d8:
+    if args.gate3b_d8 or args.s2g2_d8:
         rng_before_initial_validation = capture_rng_state(train_generator)
         try:
             initial_validation = evaluate(
@@ -1097,7 +1113,7 @@ def main():
     write_json(output_dir / 'training_summary.json', {
         'status': 'PASS',
         'run_label': args.run_label,
-        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8) else save_tag,
+        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8 or args.s2g2_d8) else save_tag,
         'epochs_completed': len(epoch_records),
         'stopped_early': stopped_early,
         'best_epoch': best_epoch,

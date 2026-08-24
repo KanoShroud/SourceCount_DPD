@@ -27,7 +27,7 @@ GIB = 1024**3
 def child_environment() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONIOENCODING"] = "utf-8:replace"
     return env
 
 

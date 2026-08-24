@@ -22,8 +22,12 @@ script_dir = fileparts(mfilename('fullpath'));
 addpath(script_dir, fileparts(script_dir));
 runtime = gate0_runtime('chapter3', mfilename);
 
-if runtime.is_smoke
-    fprintf('[Gate1] smoke 模式跳过未使用的 MATLAB 并行池。\n');
+trials_env = strtrim(getenv('SOURCECOUNT_CH3_TRIALS_LIST'));
+seed_env = strtrim(getenv('SOURCECOUNT_CH3_RANDOM_SEED'));
+controlled_run = ~isempty(trials_env) || ~isempty(seed_env);
+
+if runtime.is_smoke || controlled_run
+    fprintf('[Gate1/S2-G1] 受控模式跳过未使用的 MATLAB 并行池。\n');
 elseif isempty(gcp('nocreate'))
     parpool('local');
 end
@@ -41,6 +45,47 @@ else
     trials_list = [40000, 5000, 5000];
     smoke_seed_val = int32(-1);
 end
+
+% 可选的受控规模覆盖。未设置时严格保留原 smoke/formal 行为。
+if controlled_run
+    if isempty(trials_env) || isempty(seed_env)
+        error(['SOURCECOUNT_CH3_TRIALS_LIST 与 SOURCECOUNT_CH3_RANDOM_SEED ' ...
+            '必须同时设置。']);
+    end
+    if isempty(regexp(trials_env, '^\s*\d+\s*,\s*\d+\s*,\s*\d+\s*$', 'once'))
+        error(['SOURCECOUNT_CH3_TRIALS_LIST 必须是 3 个逗号分隔的正整数，' ...
+            '例如 2048,512,512。当前值: %s'], trials_env);
+    end
+    parsed_trials = sscanf(trials_env, '%f,%f,%f');
+    trials_cap = [40000, 5000, 5000];
+    if numel(parsed_trials) ~= 3 || any(~isfinite(parsed_trials)) || ...
+            any(parsed_trials <= 0) || any(parsed_trials ~= floor(parsed_trials))
+        error(['SOURCECOUNT_CH3_TRIALS_LIST 必须是 3 个逗号分隔的正整数，' ...
+            '例如 2048,512,512。当前值: %s'], trials_env);
+    end
+    trials_list = double(parsed_trials(:)).';
+    if any(trials_list > trials_cap)
+        error(['受控 trials 超出原始 formal 上限 [%d,%d,%d]，当前为 ' ...
+            '[%d,%d,%d]。'], trials_cap, trials_list);
+    end
+    if isempty(regexp(seed_env, '^\d+$', 'once'))
+        error(['SOURCECOUNT_CH3_RANDOM_SEED 必须是 [0,%d] 内的整数，' ...
+            '当前值: %s'], intmax('int32'), seed_env);
+    end
+    parsed_seed = str2double(seed_env);
+    if ~isfinite(parsed_seed) || parsed_seed < 0 || ...
+            parsed_seed ~= floor(parsed_seed) || parsed_seed > double(intmax('int32'))
+        error(['SOURCECOUNT_CH3_RANDOM_SEED 必须是 [0,%d] 内的整数，' ...
+            '当前值: %s'], intmax('int32'), seed_env);
+    end
+    smoke_seed_val = int32(parsed_seed);
+    rng(double(smoke_seed_val), 'twister');
+    fprintf('[S2-G1] trials 覆盖为 [%d,%d,%d]，随机种子=%d。\n', ...
+        trials_list, smoke_seed_val);
+end
+
+runtime_mode_val = runtime.mode;
+trials_list_val = int32(trials_list);
 
 fc          = 5800e6;
 arfa_V      = 0.25;
@@ -76,6 +121,8 @@ noise_jitter_var = 5;     % 噪底波动方差 (dB²)，高斯分布
 dist_range         = [0, 2000];
 dist_jitter_ratio  = 0.1;
 min_dist_src2src   = 300;
+position_min_separation_val = single(min_dist_src2src);
+position_max_retry_val = int32(100);
 
 init_pos = [0, 0];
 edge     = 2000;
@@ -208,6 +255,8 @@ for si = 1:length(set_list)
     fc_offset_all   = zeros(N_trials, max_src, 'single');
     Pt_W_all        = zeros(N_trials, max_src, 'single');
     src_pos_all     = zeros(N_trials, max_src, 2, 'single');
+    position_retry_count_all = zeros(N_trials, 1, 'int32');
+    position_constraint_failure_count_val = int32(0);
     sub_energy_all  = zeros(N_trials, N_sub, 'single');
     cov_mat_real_all = zeros(N_trials, N_sub, rcv_num, rcv_num, 'single');
     cov_mat_imag_all = zeros(N_trials, N_sub, rcv_num, rcv_num, 'single');
@@ -289,12 +338,40 @@ for si = 1:length(set_list)
             end
 
             %% ── 随机信源位置 ──
-            dist_min_base = max(dist_range(1), n_src * min_dist_src2src / (2*pi) * 1.5);
-            dist_base = dist_min_base + (dist_range(2) - dist_min_base) * rand();
-            dist_lo = max(dist_range(1), dist_base * (1 - dist_jitter_ratio));
-            dist_hi = min(dist_range(2), dist_base * (1 + dist_jitter_ratio));
-            src_pos = gen_multi_source_pos_v2(...
-                rcvPos, n_src, [dist_lo, dist_hi], min_dist_src2src);
+            position_retry_count = int32(0);
+            while true
+                dist_min_base = max(dist_range(1), n_src * min_dist_src2src / (2*pi) * 1.5);
+                dist_base = dist_min_base + (dist_range(2) - dist_min_base) * rand();
+                dist_lo = max(dist_range(1), dist_base * (1 - dist_jitter_ratio));
+                dist_hi = min(dist_range(2), dist_base * (1 + dist_jitter_ratio));
+                src_pos = gen_multi_source_pos_v2(...
+                    rcvPos, n_src, [dist_lo, dist_hi], min_dist_src2src);
+
+                min_source_separation = inf;
+                for source_idx = 1:n_src-1
+                    delta_pos = src_pos(source_idx+1:n_src, :) - src_pos(source_idx, :);
+                    min_source_separation = min(min_source_separation, ...
+                        min(sqrt(sum(delta_pos.^2, 2))));
+                end
+                if n_src < 2 || min_source_separation >= min_dist_src2src
+                    break;
+                end
+
+                % 仅S2-G1受控运行拒绝原生成器的无约束回退结果；普通入口保持原行为。
+                if ~controlled_run
+                    break;
+                end
+                position_retry_count = position_retry_count + int32(1);
+                position_constraint_failure_count_val = ...
+                    position_constraint_failure_count_val + int32(1);
+                if position_retry_count >= position_max_retry_val
+                    error(['S2-G1位置约束重试达到%d次仍失败：set=%s, trial=%d, ' ...
+                        'n_src=%d, min_separation=%.6fm。'], ...
+                        position_max_retry_val, set_name, trial, n_src, ...
+                        min_source_separation);
+                end
+            end
+            position_retry_count_all(trial) = position_retry_count;
 
             %% ── 随机中心频偏 ──
             fc_off = assign_freq_offsets(n_src, fc_offset_min, fc_offset_max, symbolRate);
@@ -461,6 +538,11 @@ for si = 1:length(set_list)
         fprintf('SNR范围: [%.1f, %.1f] dB\n', min(valid_snr), max(valid_snr));
     end
     fprintf('耗时 %.1f 秒\n', toc(t_start));
+    if controlled_run
+        fprintf('位置约束拒绝布局: %d | 发生重试样本: %d | 最大单样本重试: %d\n', ...
+            position_constraint_failure_count_val, ...
+            nnz(position_retry_count_all), max(position_retry_count_all));
+    end
 
     %% ── 一次性保存为Python可读格式 ──
     save_file = fullfile(runtime.data_dir, sprintf('%s_data.mat', set_name));
@@ -472,10 +554,14 @@ for si = 1:length(set_list)
         'avg_snr_all', 'sub_energy_all', ...
         'cov_mat_real_all', 'cov_mat_imag_all', ...
         'fc_offset_all', 'Pt_W_all', 'src_pos_all', ...
+        'position_retry_count_all', ...
+        'position_constraint_failure_count_val', ...
+        'position_min_separation_val', 'position_max_retry_val', ...
         'N_sub_val', 'max_src_val', 'num_grid', ...
         'edge_val', 'lamda_val', ...
         'B_win_val', 'B_step_val', 'fs_val', 'symbolRate_val', ...
         'BW_actual_val', 'arfa_val', 'smoke_seed_val', ...
+        'runtime_mode_val', 'trials_list_val', ...
         'sub_f_lo_val', 'sub_f_hi_val', ...
         'thresh_val', 'num_count_classes', ...
         '-v7.3');
