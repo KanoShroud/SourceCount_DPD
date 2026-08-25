@@ -26,6 +26,7 @@ train_yolo.py — YOLOv8 + CenterNet 训练脚本（精简版）
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import platform
@@ -80,6 +81,14 @@ def _json_default(value):
     if isinstance(value, torch.Tensor) and value.numel() == 1:
         return value.item()
     raise TypeError(f"无法 JSON 序列化 {type(value).__name__}")
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def write_json(path, payload):
@@ -667,6 +676,14 @@ def main():
                     help='Gate 3B D8 60 epoch 固定配置强校验，不改变训练算法')
     pa.add_argument('--s2g2_d8', action='store_true', default=False,
                     help='S2-G2 D8 200 epoch 诊断配置强校验，不改变训练算法')
+    pa.add_argument('--s2g4_scratch', action='store_true', default=False,
+                    help='S2-G4 Coarse-Oracle D8 从头200 epoch固定配置')
+    pa.add_argument('--s2g4_finetune', action='store_true', default=False,
+                    help='S2-G4 Exact-D8权重初始化后60 epoch全网络微调固定配置')
+    pa.add_argument('--init_checkpoint', type=str, default=None,
+                    help='仅加载模型权重作为初始化；不恢复优化器、调度器或RNG')
+    pa.add_argument('--expected_init_sha256', type=str, default=None,
+                    help='初始化checkpoint的预期SHA256')
     pa.add_argument('--run_label', type=str, default='')
     args = pa.parse_args()
     if args.batch_size <= 0:
@@ -678,7 +695,13 @@ def main():
     if args.seed < 0:
         pa.error('--seed 必须为非负整数')
 
-    if args.gate3_d8 or args.gate3b_d8 or args.s2g2_d8:
+    strict_modes = [
+        args.gate3_d8, args.gate3b_d8, args.s2g2_d8,
+        args.s2g4_scratch, args.s2g4_finetune,
+    ]
+    if sum(bool(mode) for mode in strict_modes) > 1:
+        pa.error('Gate 3/Gate 3B/S2-G2/S2-G4严格模式不得同时使用')
+    if any(strict_modes):
         gate3_checks = {
             'method=dualhead': args.method == 'dualhead',
             'amp=False': not args.amp,
@@ -689,7 +712,7 @@ def main():
             'soft_conf=False': not args.soft_conf,
             'batch_size=8': args.batch_size == 8,
             'val_batch_size=8': args.val_batch_size == 8,
-            'lr=1e-3': args.lr == 1e-3,
+            'lr=frozen': args.lr == (1e-4 if args.s2g4_finetune else 1e-3),
             'weight_decay=5e-3': args.weight_decay == 5e-3,
             'dropout=0.4': args.dropout == 0.4,
             'eval_every=1': args.eval_every == 1,
@@ -725,6 +748,38 @@ def main():
         failed = [name for name, passed in s2g2_checks.items() if not passed]
         if failed:
             pa.error('S2-G2 D8 参数不符合冻结配置: ' + ', '.join(failed))
+    if args.s2g4_scratch:
+        checks = {
+            'epochs=200': args.epochs == 200,
+            'patience=200': args.patience == 200,
+            'lr=1e-3': args.lr == 1e-3,
+            'seed=42': args.seed == 42,
+            'device=cuda:0': args.device == 'cuda:0',
+            'peak_size=9': args.peak_size == 9,
+            'box_size=9': args.box_size == 9,
+            'init_checkpoint=None': args.init_checkpoint is None,
+            'expected_init_sha256=None': args.expected_init_sha256 is None,
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            pa.error('S2-G4 scratch参数不符合冻结配置: ' + ', '.join(failed))
+    if args.s2g4_finetune:
+        checks = {
+            'epochs=60': args.epochs == 60,
+            'patience=60': args.patience == 60,
+            'lr=1e-4': args.lr == 1e-4,
+            'seed=42': args.seed == 42,
+            'device=cuda:0': args.device == 'cuda:0',
+            'peak_size=9': args.peak_size == 9,
+            'box_size=9': args.box_size == 9,
+            'init_checkpoint provided': args.init_checkpoint is not None,
+            'expected_init_sha256 provided': args.expected_init_sha256 is not None,
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            pa.error('S2-G4 finetune参数不符合冻结配置: ' + ', '.join(failed))
+    if args.init_checkpoint is not None and not args.s2g4_finetune:
+        pa.error('--init_checkpoint当前仅允许用于--s2g4_finetune受控分支')
 
     configure_reproducibility(args.seed, args.deterministic)
 
@@ -793,7 +848,7 @@ def main():
     write_json(output_dir / 'run_config.json', {
         'status': 'CONFIGURED',
         'run_label': args.run_label,
-        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8 or args.s2g2_d8) else save_tag,
+        'model_label': 'D8' if any(strict_modes) else save_tag,
         'args': vars(args),
         'environment': environment,
         'performance_interpretation_allowed': False,
@@ -818,6 +873,45 @@ def main():
 
     # 模型
     model = YOLOv8Loc(method=model_method, dropout=args.dropout, grad_alpha=args.grad_alpha).to(device)
+    initialization = {
+        'mode': 'random_initialization',
+        'checkpoint': None,
+        'checkpoint_sha256': None,
+        'optimizer_restored': False,
+        'scheduler_restored': False,
+        'rng_restored': False,
+    }
+    if args.init_checkpoint is not None:
+        init_path = Path(args.init_checkpoint).resolve()
+        if not init_path.is_file():
+            raise FileNotFoundError(f'初始化checkpoint不存在: {init_path}')
+        init_sha256 = sha256_file(init_path)
+        if init_sha256.lower() != args.expected_init_sha256.lower():
+            raise ValueError(
+                f'初始化checkpoint SHA256不一致: {init_sha256} != {args.expected_init_sha256}'
+            )
+        init_payload = torch.load(init_path, map_location=device, weights_only=False)
+        init_state = init_payload.get('model')
+        if not isinstance(init_state, dict):
+            init_state = init_payload.get('model_state')
+        if not isinstance(init_state, dict):
+            raise KeyError('初始化checkpoint缺少model/model_state')
+        if init_payload.get('method') != 'dualhead' or init_payload.get('save_tag') != 'dualhead_std':
+            raise ValueError('S2-G4初始化checkpoint不是D8 dualhead_std')
+        if int(init_payload.get('epoch', -1)) != 93:
+            raise ValueError(f'S2-G4初始化checkpoint epoch不是93: {init_payload.get("epoch")!r}')
+        model.load_state_dict(init_state, strict=True)
+        initialization = {
+            'mode': 'weights_only_full_network_finetune',
+            'checkpoint': str(init_path),
+            'checkpoint_sha256': init_sha256,
+            'checkpoint_epoch': int(init_payload['epoch']),
+            'optimizer_restored': False,
+            'scheduler_restored': False,
+            'rng_restored': False,
+        }
+    if args.s2g4_scratch or args.s2g4_finetune:
+        write_json(output_dir / 'initialization.json', initialization)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Parameters: {n_params:.2f}M")
 
@@ -827,7 +921,7 @@ def main():
 
     initial_validation_path = None
     initial_validation = None
-    if args.gate3b_d8 or args.s2g2_d8:
+    if args.gate3b_d8 or args.s2g2_d8 or args.s2g4_scratch or args.s2g4_finetune:
         rng_before_initial_validation = capture_rng_state(train_generator)
         try:
             initial_validation = evaluate(
@@ -1113,7 +1207,11 @@ def main():
     write_json(output_dir / 'training_summary.json', {
         'status': 'PASS',
         'run_label': args.run_label,
-        'model_label': 'D8' if (args.gate3_d8 or args.gate3b_d8 or args.s2g2_d8) else save_tag,
+        'model_label': 'D8' if any(strict_modes) else save_tag,
+        **(
+            {'initialization': initialization}
+            if args.s2g4_scratch or args.s2g4_finetune else {}
+        ),
         'epochs_completed': len(epoch_records),
         'stopped_early': stopped_early,
         'best_epoch': best_epoch,
