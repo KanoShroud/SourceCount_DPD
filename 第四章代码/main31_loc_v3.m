@@ -1,9 +1,9 @@
 %% main31_loc_v3.m  多源信源检测 + 保存IQ信号 (第四章定位训练数据 v3)
 %
 % 基于 main31_loc_v2.m，改动：
-%   1. 每源独立 symbolRate (均匀 [500kHz, 15.4MHz])
+%   1. 每源独立 symbolRate (均匀 [2MHz, 20MHz])
 %   2. 每源独立频偏 (保证所有源频率重叠)
-%   3. SIR 扩展: 源间最大功率比 10dB
+%   3. SIR 扩展: 源间最大功率比 3dB
 %   4. SNR 按 BW_union 定义: SNR_s = Pr_s / (N0 × BW_union)
 %   5. 新增 min_dist_src2rcv = 150m
 %   6. 保存 symbolRate_all, BW_actual_all
@@ -35,6 +35,14 @@ set_list = {'train', 'val', 'test'};
 if runtime.is_smoke
     trials_list = [4, 2, 2];
     random_seed_val = int32(20260821);
+    gate_profile_val = strtrim(getenv('SOURCECOUNT_CH4_GATE_PROFILE'));
+    is_s2g4r4 = strcmpi(gate_profile_val, 's2g4r4');
+    is_s2g5r1 = strcmpi(gate_profile_val, 's2g5r1');
+    is_s2g5r2 = strcmpi(gate_profile_val, 's2g5r2');
+    is_s2g5r2_8k_add = strcmpi(gate_profile_val, 's2g5r2_8k_add');
+    is_s2g5r4_16k_add = strcmpi(gate_profile_val, 's2g5r4_16k_add');
+    is_actual_interface_profile = is_s2g5r1 || is_s2g5r2 || ...
+        is_s2g5r2_8k_add || is_s2g5r4_16k_add;
 
     trials_env = strtrim(getenv('SOURCECOUNT_CH4_TRIALS_LIST'));
     if ~isempty(trials_env)
@@ -43,7 +51,15 @@ if runtime.is_smoke
                 '例如 1024,256,256。当前值: %s'], trials_env);
         end
         parsed_trials = sscanf(trials_env, '%f,%f,%f');
-        trials_cap = [2048, 512, 512];
+        if is_s2g4r4
+            trials_cap = [8192, 2048, 2048];
+        elseif is_s2g5r4_16k_add
+            trials_cap = [8192, 4, 4];
+        elseif is_s2g5r2 || is_s2g5r2_8k_add
+            trials_cap = [4096, 2048, 4];
+        else
+            trials_cap = [2048, 512, 512];
+        end
         if numel(parsed_trials) ~= 3 || any(~isfinite(parsed_trials)) || ...
                 any(parsed_trials <= 0) || any(parsed_trials ~= floor(parsed_trials))
             error(['SOURCECOUNT_CH4_TRIALS_LIST 必须是 3 个逗号分隔的正整数，' ...
@@ -72,10 +88,56 @@ if runtime.is_smoke
         random_seed_val = int32(parsed_seed);
         fprintf('[Gate3] smoke 随机种子覆盖为 %d。\n', random_seed_val);
     end
+    if is_s2g4r4
+        if any(trials_list ~= [8192, 2048, 2048])
+            error('S2-G4-R4要求trials固定为[8192,2048,2048]。');
+        end
+        if random_seed_val ~= int32(20260826)
+            error('S2-G4-R4要求MATLAB随机种子固定为20260826。');
+        end
+        fprintf('[S2-G4-R4] 已启用受控数据生成配置。\n');
+    elseif is_s2g5r1
+        if any(trials_list ~= [40, 16, 4])
+            error('S2-G5-R1要求trials固定为[40,16,4]。');
+        end
+        if random_seed_val ~= int32(20260827)
+            error('S2-G5-R1要求MATLAB随机种子固定为20260827。');
+        end
+        fprintf('[S2-G5-R1] 已启用统一IQ与Hard-19-Actual标签审计配置。\n');
+    elseif is_s2g5r2
+        if any(trials_list ~= [4096, 2048, 4])
+            error('S2G5R2:FixedTrials', 'S2-G5-R2要求trials固定为[4096,2048,4]。');
+        end
+        if random_seed_val ~= int32(20260828)
+            error('S2G5R2:FixedSeed', 'S2-G5-R2要求MATLAB随机种子固定为20260828。');
+        end
+        fprintf('[S2-G5-R2] 已启用1k/4k嵌套训练数据配置。\n');
+    elseif is_s2g5r2_8k_add
+        if any(trials_list ~= [4096, 4, 4])
+            error('S2G5R2E8:FixedTrials', ...
+                'S2-G5-R2-8K增量要求trials固定为[4096,4,4]。');
+        end
+        if random_seed_val ~= int32(20260830)
+            error('S2G5R2E8:FixedSeed', ...
+                'S2-G5-R2-8K增量要求MATLAB随机种子固定为20260830。');
+        end
+        fprintf('[S2-G5-R2-8K] 已启用新增4k训练数据配置。\n');
+    elseif is_s2g5r4_16k_add
+        if any(trials_list ~= [8192, 4, 4])
+            error('S2G5R4E16:FixedTrials', ...
+                'S2-G5-R4-16K增量要求trials固定为[8192,4,4]。');
+        end
+        if random_seed_val ~= int32(20260901)
+            error('S2G5R4E16:FixedSeed', ...
+                'S2-G5-R4-16K增量要求MATLAB随机种子固定为20260901。');
+        end
+        fprintf('[S2-G5-R4-16K] 已启用新增8k训练数据配置。\n');
+    end
     rng(double(random_seed_val), 'twister');
 else
     trials_list = [40000, 5000, 5000];
     random_seed_val = int32(-1);
+    gate_profile_val = '';
 end
 runtime_mode_val = runtime.mode;
 trials_list_val = int32(trials_list);
@@ -85,8 +147,8 @@ arfa_V      = 0.25;
 fs          = 100e6;
 
 %% ── [v3 改动] 带宽随机化 ──
-symbolRate_min = 2e6;     % 最小符号率 500kHz
-symbolRate_max = 20e6;    % 最大符号率 15.4MHz → BW_max ≈ 20MHz
+symbolRate_min = 2e6;
+symbolRate_max = 20e6;
 
 B_win       = 10e6;
 B_step      = 5e6;
@@ -99,10 +161,13 @@ f_axis      = (-len/2 : len/2-1) * (fs/len);
 max_src         = 3;
 src_num_range   = [0, 1, 2, 3];
 src_num_weights = [0.00, 0.00, 0.50, 0.50];
+if runtime.is_smoke && is_actual_interface_profile
+    src_num_weights = [0.25, 0.25, 0.25, 0.25];
+end
 
 %% ── [v3 改动] 功率配置 ──
 snr_range_dB     = [-10, 10];    % 各源 SNR 范围 (dB), 相对 N0*BW_union
-max_power_ratio_dB = 3;         % 源间最大功率比 (dB), 即 |SIR| ≤ 10dB
+max_power_ratio_dB = 3;         % 源间最大功率比 (dB), 即 |SIR| ≤ 3dB
 
 N_power_dBm = -90;
 N_power_dBW = N_power_dBm - 30;
@@ -121,6 +186,11 @@ vc       = 299792458;
 
 %% ── 标签阈值 ──
 thresh = 0.3;
+band_label_profile_val = 'mainlobe_t030';
+if runtime.is_smoke && is_actual_interface_profile
+    thresh = 0.2;
+    band_label_profile_val = 'hard19_actual_t020';
+end
 
 %% ═══════════════════════════════════════
 %  构造 Rxobj
@@ -197,6 +267,18 @@ sub_f_lo_val      = single(sub_f_lo);
 sub_f_hi_val      = single(sub_f_hi);
 thresh_val        = single(thresh);
 num_count_classes = int32(max_src + 1);
+physical_contract_version_val = 'main31_v3_shared_20260827';
+symbolRate_min_val = single(symbolRate_min);
+symbolRate_max_val = single(symbolRate_max);
+arfa_val = single(arfa_V);
+snr_range_dB_val = single(snr_range_dB);
+max_power_ratio_dB_val = single(max_power_ratio_dB);
+dist_range_val = single(dist_range);
+min_dist_src2src_val = single(min_dist_src2src);
+min_dist_src2rcv_val = single(min_dist_src2rcv);
+src_num_weights_val = single(src_num_weights);
+frequency_topology_val = 'connected_actual_overlap';
+ch4_eligible_src_counts_val = int32([2, 3]);
 
 %% ═══════════════════════════════════════
 %  三轮循环
@@ -431,28 +513,34 @@ for si = 1:length(set_list)
             symbolRate_s = symbolRate_s(sort_idx);
             BW_actual_s  = BW_actual_s(sort_idx);
 
-            band_mask_loc   = zeros(max_src, N_sub, 'single');
-            ignore_mask_loc = zeros(max_src, N_sub, 'single');
+            if runtime.is_smoke && is_actual_interface_profile
+                [band_mask_loc, ignore_mask_loc] = build_hard19_actual_labels( ...
+                    fc_off, BW_actual_s, n_src, max_src, ...
+                    sub_f_lo, sub_f_hi, B_win, thresh);
+            else
+                band_mask_loc   = zeros(max_src, N_sub, 'single');
+                ignore_mask_loc = zeros(max_src, N_sub, 'single');
 
-            for s = 1:n_src
-                % [v3] 使用逐源带宽
-                mainlobe_lo = fc_off(s) - symbolRate_s(s)/2;
-                mainlobe_hi = fc_off(s) + symbolRate_s(s)/2;
-                rolloff_lo  = fc_off(s) - BW_actual_s(s)/2;
-                rolloff_hi  = fc_off(s) + BW_actual_s(s)/2;
+                for s = 1:n_src
+                    % 原v3标签语义：主瓣覆盖为正例，滚降带只进入ignore。
+                    mainlobe_lo = fc_off(s) - symbolRate_s(s)/2;
+                    mainlobe_hi = fc_off(s) + symbolRate_s(s)/2;
+                    rolloff_lo  = fc_off(s) - BW_actual_s(s)/2;
+                    rolloff_hi  = fc_off(s) + BW_actual_s(s)/2;
 
-                for k = 1:N_sub
-                    ov_main = max(0, min(mainlobe_hi, sub_f_hi(k)) ...
-                                  - max(mainlobe_lo, sub_f_lo(k)));
-                    ov_all  = max(0, min(rolloff_hi, sub_f_hi(k)) ...
-                                  - max(rolloff_lo, sub_f_lo(k)));
-                    ov_roll = ov_all - ov_main;
-                    cov = ov_main / B_win;
+                    for k = 1:N_sub
+                        ov_main = max(0, min(mainlobe_hi, sub_f_hi(k)) ...
+                                      - max(mainlobe_lo, sub_f_lo(k)));
+                        ov_all  = max(0, min(rolloff_hi, sub_f_hi(k)) ...
+                                      - max(rolloff_lo, sub_f_lo(k)));
+                        ov_roll = ov_all - ov_main;
+                        cov = ov_main / B_win;
 
-                    if cov >= thresh
-                        band_mask_loc(s, k) = 1;
-                    elseif cov > 0 || ov_roll > 0
-                        ignore_mask_loc(s, k) = 1;
+                        if cov >= thresh
+                            band_mask_loc(s, k) = 1;
+                        elseif cov > 0 || ov_roll > 0
+                            ignore_mask_loc(s, k) = 1;
+                        end
                     end
                 end
             end
@@ -550,7 +638,14 @@ for si = 1:length(set_list)
         'B_win_val', 'B_step_val', 'fs_val', ...
         'sub_f_lo_val', 'sub_f_hi_val', ...
         'thresh_val', 'num_count_classes', ...
-        'runtime_mode_val', 'random_seed_val', 'trials_list_val', ...
+        'runtime_mode_val', 'random_seed_val', 'trials_list_val', 'gate_profile_val', ...
+        'band_label_profile_val', ...
+        'physical_contract_version_val', ...
+        'symbolRate_min_val', 'symbolRate_max_val', 'arfa_val', ...
+        'snr_range_dB_val', 'max_power_ratio_dB_val', ...
+        'dist_range_val', 'min_dist_src2src_val', 'min_dist_src2rcv_val', ...
+        'src_num_weights_val', 'frequency_topology_val', ...
+        'ch4_eligible_src_counts_val', ...
         '-v7.3');
 
     fprintf('已保存至 %s\n', save_file);

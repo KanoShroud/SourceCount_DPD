@@ -122,22 +122,24 @@ def freq_range_to_mask(freq_lo, freq_hi, N0, fs):
 # ═══════════════════════════════════════
 #  保存一个分片
 # ═══════════════════════════════════════
-def save_shard(shard_data, save_dir, split, shard_idx):
+def save_shard(shard_data, save_dir, split, shard_idx, d8_minimal=False):
     """将一批任务保存为一个 .pt 文件"""
     split_dir = os.path.join(save_dir, split)
     os.makedirs(split_dir, exist_ok=True)
     save_path = os.path.join(split_dir, f'loc_{split}_{shard_idx:03d}.pt')
 
-    torch.save({
+    payload = {
         'fine_dpd':    torch.stack(shard_data['fine_dpd']),        # (K, 1, H, W)
-        'hyp_mask':    torch.stack(shard_data['hyp_mask']),        # (K, 3, H, W)
         'gauss_label': torch.stack(shard_data['gauss_label']),     # (K, 1, H, W)
-        'gauss_multi': torch.stack(shard_data['gauss_multi']),     # (K, 3, H, W)
         'pos_label':   torch.stack(shard_data['pos_label']),       # (K, 3, 2)
         'n_src':       torch.tensor(shard_data['n_src'], dtype=torch.long),
         'sample_idx':  torch.tensor(shard_data['sample_idx'], dtype=torch.long),
         'group_idx':   torch.tensor(shard_data['group_idx'], dtype=torch.long),
-    }, save_path)
+    }
+    if not d8_minimal:
+        payload['hyp_mask'] = torch.stack(shard_data['hyp_mask'])
+        payload['gauss_multi'] = torch.stack(shard_data['gauss_multi'])
+    torch.save(payload, save_path)
 
     size_mb = os.path.getsize(save_path) / 1e6
     n = len(shard_data['n_src'])
@@ -184,6 +186,8 @@ def main():
                         help='细 DPD 每次处理的候选网格点数')
     parser.add_argument('--report_path', type=str, default=None,
                         help='可选 JSON 计时与资源报告路径')
+    parser.add_argument('--d8_minimal', action='store_true',
+                        help='仅保存D8 dualhead所需字段；默认关闭以保持原版兼容')
     args = parser.parse_args()
     if args.max_samples is not None and args.max_samples <= 0:
         parser.error('--max_samples 必须为正整数')
@@ -456,14 +460,14 @@ def main():
 
             # 分片满了 → 保存并清空
             if len(shard_data['n_src']) >= args.shard_size:
-                path = save_shard(shard_data, output_dir, args.split, shard_idx)
+                path = save_shard(shard_data, output_dir, args.split, shard_idx, args.d8_minimal)
                 shard_files.append(path)
                 shard_data = new_shard_data()
                 shard_idx += 1
 
     # 保存剩余任务
     if len(shard_data['n_src']) > 0:
-        path = save_shard(shard_data, output_dir, args.split, shard_idx)
+        path = save_shard(shard_data, output_dir, args.split, shard_idx, args.d8_minimal)
         shard_files.append(path)
         shard_idx += 1
 
@@ -484,6 +488,13 @@ def main():
         'hyp_sigma': args.hyp_sigma,
         'hyp_mode': args.hyp_mode,
         'gauss_sigma': args.gauss_sigma,
+        'storage_profile': 'd8_minimal' if args.d8_minimal else 'original_full',
+        'stored_fields': (
+            ['fine_dpd', 'gauss_label', 'pos_label', 'n_src', 'sample_idx', 'group_idx']
+            if args.d8_minimal else
+            ['fine_dpd', 'hyp_mask', 'gauss_label', 'gauss_multi', 'pos_label',
+             'n_src', 'sample_idx', 'group_idx']
+        ),
     }, index_path)
 
     # ── 统计 ──
@@ -509,6 +520,7 @@ def main():
             'expected_tasks': args.expected_tasks,
             'shard_size': args.shard_size,
             'chunk_size': args.chunk_size,
+            'storage_profile': 'd8_minimal' if args.d8_minimal else 'original_full',
             'n_input_samples': int(N),
             'n_total_tasks': int(n_total_tasks),
             'n_shards': int(shard_idx),

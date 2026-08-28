@@ -91,6 +91,18 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def sha256_state_dict(state_dict):
+    """稳定哈希模型状态，用于受控实验核对相同随机初始化。"""
+    digest = hashlib.sha256()
+    for name, value in state_dict.items():
+        tensor = value.detach().cpu().contiguous()
+        digest.update(name.encode('utf-8'))
+        digest.update(str(tuple(tensor.shape)).encode('ascii'))
+        digest.update(str(tensor.dtype).encode('ascii'))
+        digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
 def write_json(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,7 +192,8 @@ def checkpoint_payload(
 #  数据集
 # ═══════════════════════════════════════
 class LocDataset(Dataset):
-    def __init__(self, data_dir, split, method='distfield', box_size=BOX_SIZE, augment=False, dist_alpha=1.0):
+    def __init__(self, data_dir, split, method='distfield', box_size=BOX_SIZE,
+                 augment=False, dist_alpha=1.0, manifest_path=None):
         self.method = method
         self.box_size = box_size
         self.augment = augment
@@ -190,27 +203,62 @@ class LocDataset(Dataset):
         idx_path = os.path.join(split_dir, f'loc_{split}_index.pt')
         idx = torch.load(idx_path, weights_only=False)
 
+        selected_indices = None
+        selected_set = None
+        if manifest_path is not None:
+            manifest_path = Path(manifest_path).resolve()
+            with manifest_path.open('r', encoding='utf-8') as handle:
+                manifest = json.load(handle)
+            if manifest.get('split') != split:
+                raise ValueError(f'清单split不匹配: expected={split}, actual={manifest.get("split")}')
+            selected_indices = [int(value) for value in manifest['indices']]
+            if len(selected_indices) != len(set(selected_indices)) or any(value < 0 for value in selected_indices):
+                raise ValueError(f'清单包含重复或负索引: {manifest_path}')
+            selected_set = set(selected_indices)
+
         print(f"  Loading {len(idx['shard_files'])} shards for {split}...")
-        all_dpd, all_hyp, all_gauss, all_pos, all_n = [], [], [], [], []
+        all_dpd, all_hyp, all_gauss, all_pos, all_n, all_sample_idx = [], [], [], [], [], []
+        seen_selected = set()
         need_hyp = self.method in ('distfield', 'distfield_dual')
         need_gauss = self.method in ('gauss', 'dualhead')
 
         for sf in idx['shard_files']:
             d = torch.load(os.path.join(split_dir, sf), weights_only=False)
-            all_dpd.append(d['fine_dpd'])
+            rows = slice(None)
+            if selected_set is not None:
+                if 'sample_idx' not in d:
+                    raise KeyError(f'使用manifest时分片必须包含sample_idx: {sf}')
+                mask = torch.tensor(
+                    [int(value) in selected_set for value in d['sample_idx']], dtype=torch.bool,
+                )
+                rows = mask
+                seen_selected.update(int(value) for value in d['sample_idx'][mask])
+            all_dpd.append(d['fine_dpd'][rows])
             if need_hyp:
-                all_hyp.append(d['hyp_mask'])
+                all_hyp.append(d['hyp_mask'][rows])
             if need_gauss:
-                all_gauss.append(d['gauss_label'])
-            all_pos.append(d['pos_label'])
-            all_n.append(d['n_src'])
+                all_gauss.append(d['gauss_label'][rows])
+            all_pos.append(d['pos_label'][rows])
+            all_n.append(d['n_src'][rows])
+            if 'sample_idx' in d:
+                all_sample_idx.append(d['sample_idx'][rows].long())
+            elif selected_set is not None:
+                raise KeyError(f'使用manifest时分片必须包含sample_idx: {sf}')
             del d
+
+        if selected_set is not None and seen_selected != selected_set:
+            missing = sorted(selected_set - seen_selected)[:10]
+            raise ValueError(f'manifest样本未全部找到，前10个缺失索引: {missing}')
 
         self.dpd   = torch.cat(all_dpd); del all_dpd
         self.hyp   = torch.cat(all_hyp) if need_hyp else None; del all_hyp
         self.gauss = torch.cat(all_gauss) if need_gauss else None; del all_gauss
         self.pos   = torch.cat(all_pos); del all_pos
         self.n     = torch.cat(all_n); del all_n
+        self.sample_idx = (
+            torch.cat(all_sample_idx) if all_sample_idx
+            else torch.arange(len(self.n), dtype=torch.long)
+        ); del all_sample_idx
 
         mem_mb = self.dpd.element_size() * self.dpd.nelement() / 1e6
         if self.hyp is not None:
@@ -680,6 +728,14 @@ def main():
                     help='S2-G4 Coarse-Oracle D8 从头200 epoch固定配置')
     pa.add_argument('--s2g4_finetune', action='store_true', default=False,
                     help='S2-G4 Exact-D8权重初始化后60 epoch全网络微调固定配置')
+    pa.add_argument('--s2g4r3_scratch', action='store_true', default=False,
+                    help='S2-G4-R3 Exact/Hard/Soft配对跨seed D8固定配置')
+    pa.add_argument('--s2g4r4_scratch', action='store_true', default=False,
+                    help='S2-G4-R4嵌套数据规模D8固定配置')
+    pa.add_argument('--train_manifest', type=str, default=None,
+                    help='可选训练样本JSON清单；默认加载完整train')
+    pa.add_argument('--val_manifest', type=str, default=None,
+                    help='可选验证样本JSON清单；默认加载完整val')
     pa.add_argument('--init_checkpoint', type=str, default=None,
                     help='仅加载模型权重作为初始化；不恢复优化器、调度器或RNG')
     pa.add_argument('--expected_init_sha256', type=str, default=None,
@@ -697,7 +753,8 @@ def main():
 
     strict_modes = [
         args.gate3_d8, args.gate3b_d8, args.s2g2_d8,
-        args.s2g4_scratch, args.s2g4_finetune,
+        args.s2g4_scratch, args.s2g4_finetune, args.s2g4r3_scratch,
+        args.s2g4r4_scratch,
     ]
     if sum(bool(mode) for mode in strict_modes) > 1:
         pa.error('Gate 3/Gate 3B/S2-G2/S2-G4严格模式不得同时使用')
@@ -778,6 +835,44 @@ def main():
         failed = [name for name, passed in checks.items() if not passed]
         if failed:
             pa.error('S2-G4 finetune参数不符合冻结配置: ' + ', '.join(failed))
+    if args.s2g4r3_scratch:
+        checks = {
+            'epochs=200': args.epochs == 200,
+            'patience=200': args.patience == 200,
+            'lr=1e-3': args.lr == 1e-3,
+            'seed approved': args.seed in {42, 1042, 2042},
+            'device=cuda:0': args.device == 'cuda:0',
+            'peak_size=9': args.peak_size == 9,
+            'box_size=9': args.box_size == 9,
+            'init_checkpoint=None': args.init_checkpoint is None,
+            'expected_init_sha256=None': args.expected_init_sha256 is None,
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            pa.error('S2-G4-R3 scratch参数不符合冻结配置: ' + ', '.join(failed))
+    if args.s2g4r4_scratch:
+        epoch_to_scale = {200: 1024, 160: 4096, 80: 8192}
+        scale = epoch_to_scale.get(args.epochs)
+        train_manifest_name = Path(args.train_manifest).name if args.train_manifest else None
+        val_manifest_name = Path(args.val_manifest).name if args.val_manifest else None
+        checks = {
+            'epochs approved': scale is not None,
+            'patience=epochs': args.patience == args.epochs,
+            'lr=1e-3': args.lr == 1e-3,
+            'seed=42': args.seed == 42,
+            'device=cuda:0': args.device == 'cuda:0',
+            'peak_size=9': args.peak_size == 9,
+            'box_size=9': args.box_size == 9,
+            'train_manifest approved': (
+                scale is not None and train_manifest_name == f'train_{scale}.json'
+            ),
+            'val_manifest=val_select.json': val_manifest_name == 'val_select.json',
+            'init_checkpoint=None': args.init_checkpoint is None,
+            'expected_init_sha256=None': args.expected_init_sha256 is None,
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            pa.error('S2-G4-R4 scratch参数不符合冻结配置: ' + ', '.join(failed))
     if args.init_checkpoint is not None and not args.s2g4_finetune:
         pa.error('--init_checkpoint当前仅允许用于--s2g4_finetune受控分支')
 
@@ -856,9 +951,11 @@ def main():
 
     # 数据
     train_ds = LocDataset(args.data_dir, 'train', method=args.method, box_size=args.box_size,
-                          augment=True, dist_alpha=args.dist_alpha)
+                          augment=True, dist_alpha=args.dist_alpha,
+                          manifest_path=args.train_manifest)
     val_ds   = LocDataset(args.data_dir, 'val', method=args.method, box_size=args.box_size,
-                          augment=False, dist_alpha=args.dist_alpha)
+                          augment=False, dist_alpha=args.dist_alpha,
+                          manifest_path=args.val_manifest)
     cfn = collate_fn_bbox if args.method == 'bbox' else collate_fn_hm
     train_generator = torch.Generator()
     train_generator.manual_seed(args.seed)
@@ -875,6 +972,7 @@ def main():
     model = YOLOv8Loc(method=model_method, dropout=args.dropout, grad_alpha=args.grad_alpha).to(device)
     initialization = {
         'mode': 'random_initialization',
+        'model_state_sha256': sha256_state_dict(model.state_dict()),
         'checkpoint': None,
         'checkpoint_sha256': None,
         'optimizer_restored': False,
@@ -910,7 +1008,8 @@ def main():
             'scheduler_restored': False,
             'rng_restored': False,
         }
-    if args.s2g4_scratch or args.s2g4_finetune:
+    if (args.s2g4_scratch or args.s2g4_finetune or args.s2g4r3_scratch
+            or args.s2g4r4_scratch):
         write_json(output_dir / 'initialization.json', initialization)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Parameters: {n_params:.2f}M")
@@ -921,7 +1020,8 @@ def main():
 
     initial_validation_path = None
     initial_validation = None
-    if args.gate3b_d8 or args.s2g2_d8 or args.s2g4_scratch or args.s2g4_finetune:
+    if (args.gate3b_d8 or args.s2g2_d8 or args.s2g4_scratch
+            or args.s2g4_finetune or args.s2g4r3_scratch or args.s2g4r4_scratch):
         rng_before_initial_validation = capture_rng_state(train_generator)
         try:
             initial_validation = evaluate(
@@ -1210,7 +1310,8 @@ def main():
         'model_label': 'D8' if any(strict_modes) else save_tag,
         **(
             {'initialization': initialization}
-            if args.s2g4_scratch or args.s2g4_finetune else {}
+            if (args.s2g4_scratch or args.s2g4_finetune or args.s2g4r3_scratch
+                or args.s2g4r4_scratch) else {}
         ),
         'epochs_completed': len(epoch_records),
         'stopped_early': stopped_early,

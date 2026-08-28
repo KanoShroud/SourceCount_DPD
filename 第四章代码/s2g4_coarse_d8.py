@@ -533,8 +533,14 @@ def run_evaluate(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(args.device)
     require(device.type == "cuda" and (device.index or 0) == 0, "S2-G4评估固定cuda:0")
     torch.cuda.set_device(0)
-    dataset = LocDataset(str(args.data_dir.resolve()), "val", method="dualhead", augment=False)
-    require(len(dataset) == 256, "validation任务数不是256")
+    manifest = getattr(args, "manifest", None)
+    expected_samples = int(getattr(args, "expected_samples", 256))
+    dataset = LocDataset(
+        str(args.data_dir.resolve()), "val", method="dualhead", augment=False,
+        manifest_path=manifest,
+    )
+    require(len(dataset) == expected_samples,
+            f"validation任务数不是{expected_samples}: {len(dataset)}")
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False, num_workers=0,
         pin_memory=True, collate_fn=collate_fn_hm,
@@ -549,7 +555,7 @@ def run_evaluate(args: argparse.Namespace) -> dict[str, Any]:
             heatmap, offset = model(dpd)
             require(bool(torch.isfinite(heatmap).all() and torch.isfinite(offset).all()), "D8输出非法")
             for local in range(len(n_src)):
-                sample = sample_offset + local
+                sample = int(dataset.sample_idx[sample_offset + local].item())
                 count = int(n_src[local].item())
                 true_positions = pos[local, :count].numpy() * EDGE
                 predicted_positions, scores = decode_d8_sample(heatmap[local], offset[local], count)
@@ -578,7 +584,9 @@ def run_evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 samples.append(record)
             sample_offset += len(n_src)
-    require(len(samples) == 256 and len(matched_errors) == 640, "评估样本或逐源误差数量错误")
+    expected_sources = int(dataset.n.sum().item())
+    require(len(samples) == expected_samples and len(matched_errors) == expected_sources,
+            "评估样本或逐源误差数量错误")
     metrics = summarize_track(samples, matched_errors)
     errors = np.asarray(matched_errors, dtype=np.float64)
     metrics["extreme_error_counts"] = {
@@ -608,6 +616,8 @@ def run_evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint": file_identity(args.checkpoint),
         "checkpoint_epoch": int(checkpoint.get("epoch", -1)),
         "sample_count": len(samples),
+        "source_count": expected_sources,
+        "manifest": file_identity(Path(manifest)) if manifest is not None else None,
         "metrics": metrics,
         "stratified": stratified,
         "worst_samples": sorted(samples, key=lambda item: item["matched_max_m"], reverse=True)[:10],

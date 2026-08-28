@@ -13,7 +13,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -310,7 +310,30 @@ def checkpoint_payload(
     }
 
 
-def run_capacity(args: argparse.Namespace) -> int:
+DatasetFactory = Callable[..., SourceDetectionDataset]
+
+
+def _make_dataset(
+    factory: DatasetFactory | None,
+    mat_path: Path,
+    *,
+    augment: bool,
+    normalize: str,
+    max_src_override: int,
+) -> SourceDetectionDataset:
+    dataset_factory = factory or SourceDetectionDataset
+    return dataset_factory(
+        mat_path,
+        augment=augment,
+        normalize=normalize,
+        max_src_override=max_src_override,
+    )
+
+
+def run_capacity(
+    args: argparse.Namespace,
+    dataset_factory: DatasetFactory | None = None,
+) -> int:
     output = args.output.resolve()
     if output.exists():
         raise FileExistsError(f"拒绝覆盖容量检查报告: {output}")
@@ -319,7 +342,8 @@ def run_capacity(args: argparse.Namespace) -> int:
     reset_cuda_peak(device)
     started = time.perf_counter()
     rss_start = process_tree_rss_bytes()
-    dataset = SourceDetectionDataset(
+    dataset = _make_dataset(
+        dataset_factory,
         args.data_dir / "train_data.mat",
         augment=True,
         normalize="sample_zscore",
@@ -384,7 +408,10 @@ def run_capacity(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_train(args: argparse.Namespace) -> int:
+def run_train(
+    args: argparse.Namespace,
+    dataset_factory: DatasetFactory | None = None,
+) -> int:
     output_dir = args.output_dir.resolve()
     ensure_empty_directory(output_dir)
     configure_reproducibility(args.seed, args.deterministic)
@@ -392,13 +419,15 @@ def run_train(args: argparse.Namespace) -> int:
     reset_cuda_peak(device)
     started = time.perf_counter()
 
-    train_set = SourceDetectionDataset(
+    train_set = _make_dataset(
+        dataset_factory,
         args.data_dir / "train_data.mat",
         augment=True,
         normalize="sample_zscore",
         max_src_override=args.max_src,
     )
-    val_set = SourceDetectionDataset(
+    val_set = _make_dataset(
+        dataset_factory,
         args.data_dir / "val_data.mat",
         augment=False,
         normalize="sample_zscore",

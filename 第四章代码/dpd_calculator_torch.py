@@ -94,7 +94,9 @@ class DPDGeometry:
 # ═══════════════════════════════════════
 #  DPD 空间谱计算（优化版）
 # ═══════════════════════════════════════
-def compute_fine_dpd(sig_rcv_complex, geo, freq_mask=None, chunk_size=40000):
+def compute_fine_dpd(
+    sig_rcv_complex, geo, freq_mask=None, chunk_size=40000, freq_weights=None,
+):
     """
     从 IQ 信号计算细网格 DPD 空间谱（优化版）
 
@@ -103,6 +105,8 @@ def compute_fine_dpd(sig_rcv_complex, geo, freq_mask=None, chunk_size=40000):
         geo:             DPDGeometry 预计算对象
         freq_mask:       (N0,) bool, 频域掩码（可选）
         chunk_size:      每次处理的搜索点数
+        freq_weights:    (N0,) [0,1]，互谱目标权重（可选，与freq_mask互斥）；
+                         FFT振幅实际乘sqrt(freq_weights)
 
     返回:
         mtr: (num_y, num_x) float32, DPD 空间谱
@@ -114,14 +118,32 @@ def compute_fine_dpd(sig_rcv_complex, geo, freq_mask=None, chunk_size=40000):
 
     rcv_num = geo.rcv_num
     N0 = geo.N0
+    if freq_mask is not None and freq_weights is not None:
+        raise ValueError("freq_mask与freq_weights不得同时使用")
 
     # ── FFT + 滤波 + 功率归一化 ──
     sig_fft = torch.fft.fftshift(torch.fft.fft(sig_rcv_complex.to(device)), dim=-1)
 
+    support_idx = None
     if freq_mask is not None:
         if isinstance(freq_mask, np.ndarray):
             freq_mask = torch.from_numpy(freq_mask).to(device)
         sig_fft = sig_fft * freq_mask.unsqueeze(0).float()
+        support_idx = freq_mask.bool()
+    elif freq_weights is not None:
+        if isinstance(freq_weights, np.ndarray):
+            freq_weights = torch.from_numpy(freq_weights)
+        freq_weights = freq_weights.to(device=device, dtype=torch.float32)
+        if freq_weights.ndim != 1 or freq_weights.numel() != N0:
+            raise ValueError(f"freq_weights必须为({N0},)，实际为{tuple(freq_weights.shape)}")
+        if not bool(torch.isfinite(freq_weights).all()):
+            raise ValueError("freq_weights含NaN/Inf")
+        if bool(torch.any(freq_weights < 0)) or bool(torch.any(freq_weights > 1)):
+            raise ValueError("freq_weights必须位于[0,1]")
+        support_idx = freq_weights > 0
+        if not bool(support_idx.any()):
+            raise ValueError("freq_weights至少需要一个正权重频点")
+        sig_fft = sig_fft * torch.sqrt(freq_weights).unsqueeze(0)
 
     # 时域功率归一化
     sig_time = torch.fft.ifft(torch.fft.ifftshift(sig_fft, dim=-1), dim=-1)
@@ -134,8 +156,8 @@ def compute_fine_dpd(sig_rcv_complex, geo, freq_mask=None, chunk_size=40000):
     # ── 提取信号带宽内的频点（核心优化）──
     sig_fft_d = sig_fft.to(torch.complex128)
 
-    if freq_mask is not None:
-        band_idx = freq_mask.bool()
+    if support_idx is not None:
+        band_idx = support_idx
         if isinstance(band_idx, torch.Tensor):
             band_idx = band_idx.cpu()
         f_band = geo.f_full[band_idx]                       # (n_band,)
@@ -265,7 +287,8 @@ def compute_hyperbola_mask(src_pos, rcvPos, x_vec, y_vec,
 #  兼容旧接口（无预计算）
 # ═══════════════════════════════════════
 def compute_fine_dpd_compat(sig_rcv_complex, fs, rcvPos, init_pos, edge, lamda,
-                            freq_mask=None, device=None, chunk_size=40000):
+                            freq_mask=None, device=None, chunk_size=40000,
+                            freq_weights=None):
     """
     兼容旧接口：自动创建 DPDGeometry 再调用优化版
 
@@ -281,4 +304,7 @@ def compute_fine_dpd_compat(sig_rcv_complex, fs, rcvPos, init_pos, edge, lamda,
 
     # 每次创建（无预计算优势，但仍有带内频点和幂迭代优化）
     geo = DPDGeometry(rcvPos, init_pos, edge, lamda, fs, N0, device)
-    return compute_fine_dpd(sig_rcv_complex, geo, freq_mask, chunk_size)
+    return compute_fine_dpd(
+        sig_rcv_complex, geo, freq_mask, chunk_size,
+        freq_weights=freq_weights,
+    )

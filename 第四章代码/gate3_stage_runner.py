@@ -42,6 +42,13 @@ def safe_console_write(text: str) -> None:
     safe_stream_write(sys.stdout, text)
 
 
+def configure_console_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gate 3 阶段执行与资源监控")
     parser.add_argument("--stage", required=True)
@@ -50,10 +57,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scope_dir", type=Path, required=True,
                         help="统计输出体积和磁盘空间的 Gate 3 根目录")
     parser.add_argument("--working_dir", type=Path, required=True)
-    parser.add_argument("--timeout_seconds", type=float, required=True)
+    parser.add_argument(
+        "--timeout_seconds", type=float, default=0.0,
+        help="硬超时秒数；0表示禁用自动超时终止",
+    )
     parser.add_argument("--check_interval_seconds", type=float, default=10.0)
+    parser.add_argument(
+        "--console_log_mode", choices=("full", "summary"), default="full",
+        help="full转发全部子进程输出；summary仅写阶段日志并显示阶段摘要",
+    )
     parser.add_argument("--scope_output_warning_gib", type=float, default=6.5)
     parser.add_argument("--scope_output_red_gib", type=float, default=8.0)
+    parser.add_argument("--system_ram_warning_gib", type=float, default=10.0)
+    parser.add_argument("--system_ram_red_gib", type=float, default=8.0)
+    parser.add_argument("--process_rss_warning_gib", type=float, default=6.0)
+    parser.add_argument("--process_rss_red_gib", type=float, default=8.0)
+    parser.add_argument("--gpu_warning_gib", type=float, default=12.0)
+    parser.add_argument("--gpu_red_gib", type=float, default=14.0)
+    parser.add_argument("--disk_warning_gib", type=float, default=120.0)
+    parser.add_argument("--disk_red_gib", type=float, default=100.0)
     parser.add_argument("--encoding", default="utf-8")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -61,12 +83,20 @@ def parse_args() -> argparse.Namespace:
         args.command = args.command[1:]
     if not args.command:
         parser.error("必须在 -- 后提供待执行命令")
-    if args.timeout_seconds <= 0:
-        parser.error("timeout_seconds 必须为正数")
-    if not 10 <= args.check_interval_seconds <= 300:
-        parser.error("check_interval_seconds 必须在 [10,300] 秒")
+    if args.timeout_seconds < 0:
+        parser.error("timeout_seconds 不得为负数")
+    if not 0 < args.check_interval_seconds <= 300:
+        parser.error("check_interval_seconds 必须在 (0,300] 秒")
     if not 0 < args.scope_output_warning_gib < args.scope_output_red_gib:
         parser.error("输出 warning 阈值必须为正且小于 red 阈值")
+    if not 0 < args.system_ram_red_gib < args.system_ram_warning_gib:
+        parser.error("可用RAM阈值必须满足 0 < red < warning")
+    if not 0 < args.process_rss_warning_gib < args.process_rss_red_gib:
+        parser.error("进程RSS阈值必须满足 0 < warning < red")
+    if not 0 < args.gpu_warning_gib < args.gpu_red_gib:
+        parser.error("GPU阈值必须满足 0 < warning < red")
+    if not 0 < args.disk_red_gib < args.disk_warning_gib:
+        parser.error("磁盘阈值必须满足 0 < red < warning")
     return args
 
 
@@ -134,7 +164,7 @@ def process_tree_rss(pid: int) -> int:
 
 
 def classify(
-    sample: dict[str, Any], output_warning_gib: float, output_red_gib: float,
+    sample: dict[str, Any], args: argparse.Namespace,
 ) -> tuple[list[str], list[str]]:
     warnings: list[str] = []
     red_flags: list[str] = []
@@ -145,27 +175,27 @@ def classify(
     disk = sample["disk_free_bytes"]
     output = sample["scope_output_bytes"]
 
-    if available < 8 * GIB:
-        red_flags.append("system_available_ram_below_8_gib")
-    elif available < 10 * GIB:
-        warnings.append("system_available_ram_below_10_gib")
-    if rss > 8 * GIB:
-        red_flags.append("process_tree_rss_above_8_gib")
-    elif rss > 6 * GIB:
-        warnings.append("process_tree_rss_above_6_gib")
+    if available < args.system_ram_red_gib * GIB:
+        red_flags.append(f"system_available_ram_below_{args.system_ram_red_gib:g}_gib")
+    elif available < args.system_ram_warning_gib * GIB:
+        warnings.append(f"system_available_ram_below_{args.system_ram_warning_gib:g}_gib")
+    if rss > args.process_rss_red_gib * GIB:
+        red_flags.append(f"process_tree_rss_above_{args.process_rss_red_gib:g}_gib")
+    elif rss > args.process_rss_warning_gib * GIB:
+        warnings.append(f"process_tree_rss_above_{args.process_rss_warning_gib:g}_gib")
     if gpu is not None:
-        if gpu > 14 * 1024:
-            red_flags.append("gpu_used_above_14_gib")
-        elif gpu > 12 * 1024:
-            warnings.append("gpu_used_above_12_gib")
-    if disk < 100 * GIB:
-        red_flags.append("disk_free_below_100_gib")
-    elif disk < 120 * GIB:
-        warnings.append("disk_free_below_120_gib")
-    if output > output_red_gib * GIB:
-        red_flags.append(f"gate3_output_above_{output_red_gib:g}_gib")
-    elif output > output_warning_gib * GIB:
-        warnings.append(f"gate3_output_above_{output_warning_gib:g}_gib")
+        if gpu > args.gpu_red_gib * 1024:
+            red_flags.append(f"gpu_used_above_{args.gpu_red_gib:g}_gib")
+        elif gpu > args.gpu_warning_gib * 1024:
+            warnings.append(f"gpu_used_above_{args.gpu_warning_gib:g}_gib")
+    if disk < args.disk_red_gib * GIB:
+        red_flags.append(f"disk_free_below_{args.disk_red_gib:g}_gib")
+    elif disk < args.disk_warning_gib * GIB:
+        warnings.append(f"disk_free_below_{args.disk_warning_gib:g}_gib")
+    if output > args.scope_output_red_gib * GIB:
+        red_flags.append(f"gate3_output_above_{args.scope_output_red_gib:g}_gib")
+    elif output > args.scope_output_warning_gib * GIB:
+        warnings.append(f"gate3_output_above_{args.scope_output_warning_gib:g}_gib")
     return warnings, red_flags
 
 
@@ -206,7 +236,10 @@ def stop_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 def main() -> int:
+    configure_console_encoding()
     args = parse_args()
+    requested_check_interval = args.check_interval_seconds
+    check_interval = max(10.0, requested_check_interval)
     output_dir = args.output_dir.resolve()
     scope_dir = args.scope_dir.resolve()
     working_dir = args.working_dir.resolve()
@@ -222,9 +255,7 @@ def main() -> int:
     all_red_flags: set[str] = set()
 
     preflight = sample_resources(None, scope_dir, started)
-    pre_warnings, pre_red = classify(
-        preflight, args.scope_output_warning_gib, args.scope_output_red_gib,
-    )
+    pre_warnings, pre_red = classify(preflight, args)
     samples.append(preflight)
     all_warnings.update(pre_warnings)
     all_red_flags.update(pre_red)
@@ -254,7 +285,14 @@ def main() -> int:
         stderr=subprocess.STDOUT,
     )
     print(f"[{args.gate_label}] stage={args.stage} pid={process.pid}")
-    safe_console_write(f"[{args.gate_label}] command={args.command}\n")
+    if requested_check_interval < 10:
+        print(
+            f"[{args.gate_label}] check_interval={requested_check_interval:g}s "
+            "自动提升为10s。",
+            flush=True,
+        )
+    if args.console_log_mode == "full":
+        safe_console_write(f"[{args.gate_label}] command={args.command}\n")
 
     def copy_output() -> None:
         assert process.stdout is not None
@@ -263,7 +301,8 @@ def main() -> int:
                 line = raw_line.decode(args.encoding, errors="replace")
                 log_handle.write(line)
                 log_handle.flush()
-                safe_console_write(line)
+                if args.console_log_mode == "full":
+                    safe_console_write(line)
 
     reader = threading.Thread(target=copy_output, daemon=True)
     reader.start()
@@ -272,15 +311,13 @@ def main() -> int:
 
     while process.poll() is None:
         elapsed = time.perf_counter() - started
-        if elapsed >= args.timeout_seconds:
+        if args.timeout_seconds > 0 and elapsed >= args.timeout_seconds:
             timeout_hit = True
             print(f"[{args.gate_label}][HARD_TIMEOUT] {elapsed:.1f}s，终止进程树。", flush=True)
             stop_process_tree(process)
             break
         sample = sample_resources(process.pid, scope_dir, started)
-        warnings, red_flags = classify(
-            sample, args.scope_output_warning_gib, args.scope_output_red_gib,
-        )
+        warnings, red_flags = classify(sample, args)
         samples.append(sample)
         all_warnings.update(warnings)
         all_red_flags.update(red_flags)
@@ -290,10 +327,13 @@ def main() -> int:
                 print(f"[{args.gate_label}][{level}] {alert}", flush=True)
                 announced.add(alert)
         try:
-            process.wait(timeout=min(
-                args.check_interval_seconds,
-                max(0.1, args.timeout_seconds - elapsed),
-            ))
+            wait_seconds = check_interval
+            if args.timeout_seconds > 0:
+                wait_seconds = min(
+                    check_interval,
+                    max(0.1, args.timeout_seconds - elapsed),
+                )
+            process.wait(timeout=wait_seconds)
         except subprocess.TimeoutExpired:
             pass
 
@@ -305,9 +345,7 @@ def main() -> int:
     reader.join(timeout=15)
     final_sample = sample_resources(None, scope_dir, started)
     samples.append(final_sample)
-    warnings, red_flags = classify(
-        final_sample, args.scope_output_warning_gib, args.scope_output_red_gib,
-    )
+    warnings, red_flags = classify(final_sample, args)
     all_warnings.update(warnings)
     all_red_flags.update(red_flags)
 
@@ -333,9 +371,23 @@ def main() -> int:
         "duration_seconds": time.perf_counter() - started,
         "exit_code": int(exit_code),
         "timeout_seconds": args.timeout_seconds,
+        "timeout_enabled": args.timeout_seconds > 0,
+        "requested_check_interval_seconds": requested_check_interval,
+        "effective_check_interval_seconds": check_interval,
+        "console_log_mode": args.console_log_mode,
         "gate_label": args.gate_label,
         "scope_output_warning_gib": args.scope_output_warning_gib,
         "scope_output_red_gib": args.scope_output_red_gib,
+        "resource_thresholds_gib": {
+            "system_ram_warning": args.system_ram_warning_gib,
+            "system_ram_red": args.system_ram_red_gib,
+            "process_rss_warning": args.process_rss_warning_gib,
+            "process_rss_red": args.process_rss_red_gib,
+            "gpu_warning": args.gpu_warning_gib,
+            "gpu_red": args.gpu_red_gib,
+            "disk_warning": args.disk_warning_gib,
+            "disk_red": args.disk_red_gib,
+        },
         "warnings": sorted(all_warnings),
         "red_flags": sorted(all_red_flags),
         "minimum_system_available_bytes": min(s["system_available_bytes"] for s in samples),
@@ -350,7 +402,14 @@ def main() -> int:
         "resource_csv": str(resource_path.resolve()),
     }
     write_json(output_dir / "stage_monitor_report.json", report)
-    safe_console_write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    if args.console_log_mode == "full":
+        safe_console_write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    else:
+        safe_console_write(
+            f"[{args.gate_label}] stage={args.stage} status={status} "
+            f"elapsed={report['duration_seconds']:.1f}s "
+            f"warnings={len(report['warnings'])} red_flags={len(report['red_flags'])}\n"
+        )
     if status == "PASS":
         return 0
     if status == "COMPLETED_WITH_RED_FLAGS":
