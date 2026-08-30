@@ -45,6 +45,7 @@ EXPECTED_HASHES = {
     "checkpoint_8k": "291ee9bce04b3a5a603568285d8505fd042d0937cc3ab48f6415ed0f24b80e2c",
     "val_compare": "a35cb199299e17cc86d3cf9793e63e76a7c92650e35558d6d82106188ea90005",
 }
+EXPECTED_16K_CHECKPOINT = "f2f7a7c345f1866b871282670f45671d930de34bb06493a9828a9d04a38699c4"
 BOOTSTRAP_SEED = 20260902
 STATIC_FIELDS = {
     "N_sub_val",
@@ -311,7 +312,13 @@ def infer_with_scores(checkpoint: Path, data_path: Path) -> dict[str, np.ndarray
             batch = torch.stack([dataset[index][0] for index in range(start, min(start + 64, len(dataset)))])
             logits.append(model(batch.to(device)).cpu().numpy())
     probabilities = 1.0 / (1.0 + np.exp(-np.concatenate(logits)))
+    reloaded_prediction = probabilities > float(payload["config"]["threshold"])
+    require(
+        np.array_equal(reloaded_prediction, arrays["prediction"]),
+        "checkpoint独立重载预测与首次推理不一致",
+    )
     arrays["probabilities"] = probabilities.astype(np.float32)
+    arrays["independent_reload_prediction_exact"] = np.asarray([True])
     return arrays
 
 
@@ -357,6 +364,10 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
         "paired_bootstrap": paired_bootstrap_8k_16k(arrays_8k, arrays_16k, args.repetitions),
         "confidence_8k": confidence_diagnostic(arrays_8k),
         "confidence_16k": confidence_diagnostic(arrays_16k),
+        "independent_reload_prediction_exact": {
+            "8k": bool(arrays_8k["independent_reload_prediction_exact"][0]),
+            "16k": bool(arrays_16k["independent_reload_prediction_exact"][0]),
+        },
         "scope": "fixed validation scale/confidence diagnosis; no test, calibration, or threshold tuning",
     }
     return result
@@ -430,6 +441,90 @@ def run_pretrain_finalize(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def run_finalize_r4(args: argparse.Namespace) -> dict[str, Any]:
+    run_root = args.run_root.resolve()
+    paths = {
+        "lazy_status": run_root / "lazy_pretrain_status.json",
+        "training_summary": run_root / "train_16k" / "training_summary.json",
+        "training_monitor": run_root / "monitor" / "10_train_16k" / "stage_monitor_report.json",
+        "checkpoint": run_root / "train_16k" / "best_model_v26_B_M10.pth",
+        "scale_compare": run_root / "analysis" / "16k" / "compare_8k_16k.json",
+        "scale_monitor": run_root / "monitor" / "16_compare_8k_16k" / "stage_monitor_report.json",
+        "cascade_final": run_root / "cascade_16k" / "final_report.json",
+    }
+    require(all(path.is_file() for path in paths.values()), "R4总门禁所需文件不完整")
+    lazy = load_json(paths["lazy_status"])
+    training = load_json(paths["training_summary"])
+    training_monitor = load_json(paths["training_monitor"])
+    scale = load_json(paths["scale_compare"])
+    scale_monitor = load_json(paths["scale_monitor"])
+    cascade = load_json(paths["cascade_final"])
+    require(lazy["status"] == "LAZY_READY_FOR_TRAINING", "lazy门禁未通过")
+    require(training["status"] == "TRAIN_COMPLETED", "16k训练未完成")
+    require(training["best_epoch"] == 78 and training["epochs_completed"] == 103, "训练冻结轮次错误")
+    require(training["learning_gate"]["pass"] and training["convergence_gate"]["pass"], "训练门未通过")
+    require(training_monitor["status"] == "PASS" and not training_monitor["red_flags"], "训练监控未通过")
+    require(sha256_file(paths["checkpoint"]) == EXPECTED_16K_CHECKPOINT, "16k checkpoint SHA变化")
+    require(scale["status"] == "PASS", "8k/16k比较未通过")
+    require(all(scale["independent_reload_prediction_exact"].values()), "checkpoint独立重载不一致")
+    require(scale_monitor["status"] == "PASS" and not scale_monitor["red_flags"], "规模比较监控未通过")
+    require(cascade["status"] == "PASS", "16k级联总门禁未通过")
+    require(cascade["scientific_decision"] == "ENTER_K_CANDIDATE_GATE", "R4路线判定不一致")
+    analysis = cascade["analysis"]
+    require(not analysis["scale_gate_pass"], "规模门状态不一致")
+    require(
+        analysis["standard_four_track"]["decision"]["interface_status"]
+        == "DIRECT_CASCADE_NOT_YET_SUPPORTED",
+        "级联等效门状态不一致",
+    )
+    require(analysis["top2_coverage_among_16k_errors"] >= 0.80, "Top-2覆盖不足")
+    require(analysis["candidate_oracle_recovery_point"] >= 0.50, "候选K上限恢复不足")
+    frozen_inputs = {
+        "old_8k": sha256_file(OLD_8K),
+        "val_compare": sha256_file(VAL_COMPARE),
+        "checkpoint_8k": sha256_file(CHECKPOINT_8K),
+    }
+    require(frozen_inputs["old_8k"] == EXPECTED_HASHES["old_8k"], "旧8k SHA变化")
+    require(frozen_inputs["val_compare"] == EXPECTED_HASHES["val_compare"], "validation SHA变化")
+    require(frozen_inputs["checkpoint_8k"] == EXPECTED_HASHES["checkpoint_8k"], "8k checkpoint SHA变化")
+    return {
+        "status": "PASS",
+        "gate": "S2-G5-R4",
+        "experiment_id": "CH3-S2G5-R4-20260828",
+        "scientific_decision": "ENTER_K_CANDIDATE_GATE",
+        "formal_training": {
+            "epochs_completed": training["epochs_completed"],
+            "best_epoch": training["best_epoch"],
+            "checkpoint_sha256": EXPECTED_16K_CHECKPOINT,
+            "duration_seconds": training["duration_seconds"],
+        },
+        "scale_metrics": {
+            "balanced_count_accuracy_8k": scale["metrics_8k"]["balanced_count_accuracy"],
+            "balanced_count_accuracy_16k": scale["metrics_16k"]["balanced_count_accuracy"],
+            "active_band_macro_f1_8k": scale["metrics_8k"]["active_band_macro_f1"],
+            "active_band_macro_f1_16k": scale["metrics_16k"]["active_band_macro_f1"],
+            "scale_gate_pass": False,
+        },
+        "cascade": {
+            "direct_interface_supported": False,
+            "full_relative_gospa_increase": analysis["standard_four_track"]["effects"]["full_relative_gospa_increase"],
+            "full_relative_gospa_ci95": analysis["standard_four_track"]["bootstrap"]["metrics"]["full_relative_gospa"]["ci95"],
+            "count_path_loss_8k_m": analysis["count_path_loss_8k_m"],
+            "count_path_loss_16k_m": analysis["count_path_loss_16k_m"],
+            "top2_coverage_among_errors": analysis["top2_coverage_among_16k_errors"],
+            "candidate_oracle_recovery_point": analysis["candidate_oracle_recovery_point"],
+        },
+        "evidence": {name: {"path": str(path), "sha256": sha256_file(path)} for name, path in paths.items()},
+        "frozen_inputs_unchanged": frozen_inputs,
+        "prohibitions": {
+            "test_executed": False,
+            "threshold_tuned": False,
+            "model_or_loss_changed": False,
+            "entered_32k_or_k_gate": False,
+        },
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -452,6 +547,9 @@ def parse_args() -> argparse.Namespace:
     finalize = sub.add_parser("finalize-pretrain")
     finalize.add_argument("--run_root", type=Path, required=True)
     finalize.add_argument("--output", type=Path, required=True)
+    finalize_r4 = sub.add_parser("finalize-r4")
+    finalize_r4.add_argument("--run_root", type=Path, required=True)
+    finalize_r4.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -468,6 +566,8 @@ def main() -> None:
         result = run_compare(args)
     elif args.command == "finalize-pretrain":
         result = run_pretrain_finalize(args)
+    elif args.command == "finalize-r4":
+        result = run_finalize_r4(args)
     else:
         raise AssertionError(f"未知命令: {args.command}")
     write_json(args.output, result)

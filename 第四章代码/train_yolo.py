@@ -103,6 +103,11 @@ def sha256_state_dict(state_dict):
     return digest.hexdigest()
 
 
+def tensor_is_finite(value):
+    """避开部分Windows CUDA构建缺失isfinite kernel，语义保持等价。"""
+    return bool(torch.isnan(value).sum().item() == 0 and torch.isinf(value).sum().item() == 0)
+
+
 def write_json(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -564,12 +569,12 @@ def evaluate(model, loader, device, method, peak_size=PEAK_SIZE, full_metrics=Tr
                 pred_hm = model(dpd)
 
         if method == 'bbox':
-            if not all(bool(torch.isfinite(value).all()) for value in (*cls_list, *reg_list)):
+            if not all(tensor_is_finite(value) for value in (*cls_list, *reg_list)):
                 raise FloatingPointError('验证阶段 bbox 输出含 NaN/Inf')
         elif _is_dualhead:
-            if not bool(torch.isfinite(pred_hm).all() and torch.isfinite(pred_offset).all()):
+            if not (tensor_is_finite(pred_hm) and tensor_is_finite(pred_offset)):
                 raise FloatingPointError('验证阶段 heatmap/offset 输出含 NaN/Inf')
-        elif not bool(torch.isfinite(pred_hm).all()):
+        elif not tensor_is_finite(pred_hm):
             raise FloatingPointError('验证阶段 heatmap 输出含 NaN/Inf')
 
         # 所有 loss 在 autocast 外
@@ -590,7 +595,7 @@ def evaluate(model, loader, device, method, peak_size=PEAK_SIZE, full_metrics=Tr
             if dice_weight > 0:
                 loss = loss + dice_weight * dice_loss(pred_hm.float(), tgt_dev)
 
-        if not bool(torch.isfinite(loss)):
+        if not tensor_is_finite(loss):
             raise FloatingPointError('验证阶段 loss 含 NaN/Inf')
         total_loss += loss.item(); n_batches += 1
 
@@ -625,7 +630,7 @@ def evaluate(model, loader, device, method, peak_size=PEAK_SIZE, full_metrics=Tr
                             iy = int(topk_y[b_i, k_i].item())
                             dx = pred_offset[b_i, 0, iy, ix].float()
                             dy = pred_offset[b_i, 1, iy, ix].float()
-                            if torch.isfinite(dx) and torch.isfinite(dy):
+                            if tensor_is_finite(dx) and tensor_is_finite(dy):
                                 topk_x[b_i, k_i] += dx.clamp(-1, 1)
                                 topk_y[b_i, k_i] += dy.clamp(-1, 1)
                 topk_coords = torch.stack([topk_x, topk_y], dim=-1)
@@ -732,6 +737,8 @@ def main():
                     help='S2-G4-R3 Exact/Hard/Soft配对跨seed D8固定配置')
     pa.add_argument('--s2g4r4_scratch', action='store_true', default=False,
                     help='S2-G4-R4嵌套数据规模D8固定配置')
+    pa.add_argument('--s2g5r6_scratch', action='store_true', default=False,
+                    help='S2-G5-R6-A 8k Hard-D8跨seed固定配置')
     pa.add_argument('--train_manifest', type=str, default=None,
                     help='可选训练样本JSON清单；默认加载完整train')
     pa.add_argument('--val_manifest', type=str, default=None,
@@ -754,7 +761,7 @@ def main():
     strict_modes = [
         args.gate3_d8, args.gate3b_d8, args.s2g2_d8,
         args.s2g4_scratch, args.s2g4_finetune, args.s2g4r3_scratch,
-        args.s2g4r4_scratch,
+        args.s2g4r4_scratch, args.s2g5r6_scratch,
     ]
     if sum(bool(mode) for mode in strict_modes) > 1:
         pa.error('Gate 3/Gate 3B/S2-G2/S2-G4严格模式不得同时使用')
@@ -873,6 +880,25 @@ def main():
         failed = [name for name, passed in checks.items() if not passed]
         if failed:
             pa.error('S2-G4-R4 scratch参数不符合冻结配置: ' + ', '.join(failed))
+    if args.s2g5r6_scratch:
+        train_manifest_name = Path(args.train_manifest).name if args.train_manifest else None
+        val_manifest_name = Path(args.val_manifest).name if args.val_manifest else None
+        checks = {
+            'epochs=80': args.epochs == 80,
+            'patience=80': args.patience == 80,
+            'lr=1e-3': args.lr == 1e-3,
+            'seed approved': args.seed in {1042, 2042},
+            'device=cuda:0': args.device == 'cuda:0',
+            'peak_size=9': args.peak_size == 9,
+            'box_size=9': args.box_size == 9,
+            'train_manifest=train_8192.json': train_manifest_name == 'train_8192.json',
+            'val_manifest=val_select.json': val_manifest_name == 'val_select.json',
+            'init_checkpoint=None': args.init_checkpoint is None,
+            'expected_init_sha256=None': args.expected_init_sha256 is None,
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            pa.error('S2-G5-R6 scratch参数不符合冻结配置: ' + ', '.join(failed))
     if args.init_checkpoint is not None and not args.s2g4_finetune:
         pa.error('--init_checkpoint当前仅允许用于--s2g4_finetune受控分支')
 
@@ -1021,7 +1047,8 @@ def main():
     initial_validation_path = None
     initial_validation = None
     if (args.gate3b_d8 or args.s2g2_d8 or args.s2g4_scratch
-            or args.s2g4_finetune or args.s2g4r3_scratch or args.s2g4r4_scratch):
+            or args.s2g4_finetune or args.s2g4r3_scratch or args.s2g4r4_scratch
+            or args.s2g5r6_scratch):
         rng_before_initial_validation = capture_rng_state(train_generator)
         try:
             initial_validation = evaluate(
@@ -1101,7 +1128,7 @@ def main():
                     loss = l_focal
                 tl_focal += l_focal.item()
 
-            if not bool(torch.isfinite(loss)):
+            if not tensor_is_finite(loss):
                 raise FloatingPointError(
                     f'训练 loss 非有限: epoch={ep + 1}, batch={batch_index + 1}'
                 )
@@ -1196,7 +1223,7 @@ def main():
         if args.fail_on_nonfinite:
             bad_parameter = next((
                 name for name, parameter in model.named_parameters()
-                if not bool(torch.isfinite(parameter).all())
+                if not tensor_is_finite(parameter)
             ), None)
             if bad_parameter is not None:
                 raise FloatingPointError(

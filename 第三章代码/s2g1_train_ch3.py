@@ -135,7 +135,12 @@ def make_loader(
 
 
 def finite_tensor(tensor: torch.Tensor, name: str) -> None:
-    require(torch.isfinite(tensor).all().item(), f"{name} 包含 NaN/Inf")
+    require(tensor_finite(tensor), f"{name} 包含 NaN/Inf")
+
+
+def tensor_finite(tensor: torch.Tensor) -> bool:
+    """避开部分Windows CUDA构建缺失isfinite kernel，语义保持等价。"""
+    return bool(torch.isnan(tensor).sum().item() == 0 and torch.isinf(tensor).sum().item() == 0)
 
 
 def reset_cuda_peak(device: torch.device) -> None:
@@ -283,7 +288,7 @@ def build_model(n_sub: int, max_src: int, mode: str, device: torch.device) -> So
         mode=mode,
     ).to(device)
     require(
-        all(torch.isfinite(parameter).all().item() for parameter in model.parameters()),
+        all(tensor_finite(parameter) for parameter in model.parameters()),
         "初始化模型参数包含 NaN/Inf",
     )
     return model
@@ -376,7 +381,7 @@ def run_capacity(
     loss.backward()
     gradients = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
     require(gradients, "容量检查没有产生梯度")
-    require(all(torch.isfinite(gradient).all().item() for gradient in gradients), "梯度包含 NaN/Inf")
+    require(all(tensor_finite(gradient) for gradient in gradients), "梯度包含 NaN/Inf")
     gradient_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item())
     optimizer.step()
     if device.type == "cuda":
@@ -546,7 +551,7 @@ def run_train(
             ]
             require(gradients, "训练没有产生梯度")
             require(
-                all(torch.isfinite(gradient).all().item() for gradient in gradients),
+                all(tensor_finite(gradient) for gradient in gradients),
                 "训练梯度包含 NaN/Inf",
             )
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
