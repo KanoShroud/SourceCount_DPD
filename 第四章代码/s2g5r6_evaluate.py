@@ -478,9 +478,11 @@ def run_summarize(args: argparse.Namespace) -> dict[str, Any]:
     require(all(config_checks.values()), f"R6新seed配置与seed42冻结配置不一致: {config_checks}")
     diagonal = {}
     cross_gospa = []
+    cross_matched_rmse = []
     cross_direct = []
     for ch3_seed in SEEDS:
         gospa_row = []
+        rmse_row = []
         direct_row = []
         for d8_seed in SEEDS:
             pair = final["cross_matrix"]["all_pairs"][f"{ch3_seed}/{d8_seed}"]
@@ -488,6 +490,11 @@ def run_summarize(args: argparse.Namespace) -> dict[str, Any]:
                 "ob_ok": pair["tracks"]["OB-OK"]["gospa"]["mean"],
                 "pb_base": pair["tracks"]["PB-BASE"]["gospa"]["mean"],
                 "pb_selected": pair["tracks"]["PB-SELECTED"]["gospa"]["mean"],
+            })
+            rmse_row.append({
+                "ob_ok": pair["tracks"]["OB-OK"]["matched_errors_m"]["rmse"],
+                "pb_base": pair["tracks"]["PB-BASE"]["matched_errors_m"]["rmse"],
+                "pb_selected": pair["tracks"]["PB-SELECTED"]["matched_errors_m"]["rmse"],
             })
             direct_row.append(pair["direct_gate"])
             if ch3_seed == d8_seed:
@@ -499,12 +506,23 @@ def run_summarize(args: argparse.Namespace) -> dict[str, Any]:
                     "ob_ok_gospa_m": pair["tracks"]["OB-OK"]["gospa"]["mean"],
                     "pb_base_gospa_m": pair["tracks"]["PB-BASE"]["gospa"]["mean"],
                     "pb_selected_gospa_m": pair["tracks"]["PB-SELECTED"]["gospa"]["mean"],
+                    "matched_rmse_m": {
+                        "ob_ok": pair["tracks"]["OB-OK"]["matched_errors_m"]["rmse"],
+                        "pb_base": pair["tracks"]["PB-BASE"]["matched_errors_m"]["rmse"],
+                        "pb_selected": pair["tracks"]["PB-SELECTED"]["matched_errors_m"]["rmse"],
+                    },
+                    "matched_pair_coverage_of_true": {
+                        "ob_ok": pair["tracks"]["OB-OK"]["matched_pair_coverage_of_true"],
+                        "pb_base": pair["tracks"]["PB-BASE"]["matched_pair_coverage_of_true"],
+                        "pb_selected": pair["tracks"]["PB-SELECTED"]["matched_pair_coverage_of_true"],
+                    },
                     "pb_selected_recall_100m": pair["tracks"]["PB-SELECTED"]["set_detection"]["100m"]["recall"],
                     "direct_gate": pair["direct_gate"],
                     "selected_better_than_baseline": pair["selected_better_than_baseline_point"],
                     "bootstrap": pair["paired_bootstrap"],
                 }
         cross_gospa.append(gospa_row)
+        cross_matched_rmse.append(rmse_row)
         cross_direct.append(direct_row)
     report = {
         "status": "PASS", "gate": "S2-G5-R6-A", "experiment_id": "SYS-S2G5-R6A-20260829",
@@ -513,7 +531,8 @@ def run_summarize(args: argparse.Namespace) -> dict[str, Any]:
         "diagonal": diagonal,
         "cross_matrix": {
             "row_seeds_ch3": list(SEEDS), "column_seeds_d8": list(SEEDS),
-            "gospa_m": cross_gospa, "direct_gate": cross_direct,
+            "gospa_m": cross_gospa, "matched_rmse_m": cross_matched_rmse,
+            "direct_gate": cross_direct,
             "selected_better_than_baseline": final["cross_matrix"]["selected_better_than_baseline"],
             "no_single_row_or_column_dependency": final["cross_matrix"]["no_single_row_or_column_dependency"],
         },
@@ -521,7 +540,8 @@ def run_summarize(args: argparse.Namespace) -> dict[str, Any]:
         "noncatastrophic_diagonal": final["noncatastrophic_diagonal"],
         "test_read": False, "r6b_started": False,
     }
-    write_json(run_root / "validation" / "r6a_summary.json", report)
+    output_path = args.summary_output.resolve() if args.summary_output else run_root / "validation" / "r6a_summary.json"
+    write_json(output_path, report)
     return report
 
 
@@ -536,7 +556,8 @@ def parse_args() -> argparse.Namespace:
     pair.add_argument("--ch3_seed", type=int, choices=SEEDS, required=True)
     pair.add_argument("--d8_seed", type=int, choices=SEEDS, required=True)
     sub.add_parser("finalize")
-    sub.add_parser("summarize")
+    summarize = sub.add_parser("summarize")
+    summarize.add_argument("--summary_output", type=Path)
     return parser.parse_args()
 
 
