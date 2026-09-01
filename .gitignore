@@ -22,6 +22,7 @@ dist/
 # Gate 0 centralized datasets and run artifacts
 data/
 outputs/
+outputs_e2e/
 
 # OS and temporary files
 .DS_Store

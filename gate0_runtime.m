@@ -6,7 +6,8 @@ function cfg = gate0_runtime(chapter_name, entry_name)
 %
 % 可选环境变量：
 %   SOURCECOUNT_DATA_ROOT   正式数据根目录，默认 <project>/data
-%   SOURCECOUNT_OUTPUT_ROOT 输出根目录，默认 <project>/outputs
+%   SOURCECOUNT_OUTPUT_ROOT           输出根目录，默认 <project>/outputs_e2e
+%   SOURCECOUNT_REFERENCE_OUTPUT_ROOT 原项目冻结outputs根目录，只读
 
 project_root = fileparts(mfilename('fullpath'));
 run_mode = lower(strtrim(getenv('SOURCECOUNT_RUN_MODE')));
@@ -23,7 +24,27 @@ if isempty(data_root)
 end
 output_root = strtrim(getenv('SOURCECOUNT_OUTPUT_ROOT'));
 if isempty(output_root)
-    output_root = fullfile(project_root, 'outputs');
+    output_root = fullfile(project_root, 'outputs_e2e');
+end
+reference_output_root = strtrim(getenv('SOURCECOUNT_REFERENCE_OUTPUT_ROOT'));
+if ~isempty(reference_output_root)
+    reference_output_root = canonical_path(reference_output_root);
+    output_root = canonical_path(output_root);
+    data_root = canonical_path(data_root);
+    if ~isfolder(reference_output_root)
+        error('只读参考根不存在: %s', reference_output_root);
+    end
+    reference_prefix = [lower(reference_output_root), filesep];
+    output_prefix = [lower(output_root), filesep];
+    if strcmpi(reference_output_root, output_root) || ...
+            startsWith(lower(output_root), reference_prefix) || ...
+            startsWith(lower(reference_output_root), output_prefix)
+        error('输出根与只读参考根必须不同且互不嵌套。');
+    end
+    if strcmpi(reference_output_root, data_root) || ...
+            startsWith(lower(data_root), reference_prefix)
+        error('数据写入根不得位于原项目冻结outputs内。');
+    end
 end
 
 if strcmp(run_mode, 'smoke')
@@ -42,11 +63,20 @@ cfg.mode = run_mode;
 cfg.is_smoke = strcmp(run_mode, 'smoke');
 cfg.data_dir = data_dir;
 cfg.output_dir = entry_output_dir;
+cfg.reference_output_root = reference_output_root;
 
 fprintf('[Gate0] mode=%s\n', cfg.mode);
 fprintf('[Gate0] data=%s\n', cfg.data_dir);
 fprintf('[Gate0] output=%s\n', cfg.output_dir);
+if ~isempty(cfg.reference_output_root)
+    fprintf('[Gate0] reference_outputs=%s [READ ONLY]\n', ...
+        cfg.reference_output_root);
+end
 if cfg.is_smoke
     fprintf('[Gate0] 默认 smoke 已启用；不会写入正式数据目录。\n');
 end
+end
+
+function path_out = canonical_path(path_in)
+path_out = char(java.io.File(path_in).getCanonicalPath());
 end

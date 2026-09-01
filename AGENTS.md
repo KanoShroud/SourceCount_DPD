@@ -11,6 +11,12 @@
 - 新建或已确认采用 UTF-8 的文本文件，Python 读写时显式指定 `encoding="utf-8"`；外部文件保持原编码。
 - Python 中处理路径优先使用 `pathlib.Path`；确需字符串路径时避免不安全的转义。
 
+### E2E 路径隔离
+
+- `F:\SourceCount_DPD\outputs`仅作冻结参考输入；本工作树的新数据、缓存、权重和结果统一写入`outputs_e2e/`。
+- 禁止写入、移动、删除原`outputs`，也不得用链接将本地输出目录指向它。
+- 运行前必须核对读写根分离、参考产物身份和新输出目标为空或不存在。
+
 ### Windows 子进程与日志
 
 - Python 在 Windows 上调用 `subprocess.run(..., text=True)` 时必须显式指定实际编码和错误策略，不得依赖系统默认代码页。项目内 Python、Git、`nvidia-smi` 等 UTF-8/ASCII 输出统一使用 `encoding="utf-8", errors="replace"`；已确认输出为其他代码页的外部程序应显式声明对应编码，并将保存日志统一写为 UTF-8。
