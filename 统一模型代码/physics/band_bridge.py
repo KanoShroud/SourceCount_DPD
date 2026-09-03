@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -88,6 +89,8 @@ def continuous_band_bridge(
     *,
     values_are_logits: bool = True,
     max_count: int = 3,
+    slot_existence_mode: str = "noisy_or",
+    slot_temperature: float = 1.0,
 ) -> BridgeOutput:
     """把槽位×子带 logits/概率映射为连续 FFT 权重。"""
     if values.ndim < 2:
@@ -107,7 +110,19 @@ def continuous_band_bridge(
     ):
         raise ValueError("直接输入的概率必须位于[0,1]")
     probabilities = probabilities.clamp(0.0, 1.0)
-    slot_existence = 1.0 - torch.prod(1.0 - probabilities, dim=-1)
+    if slot_existence_mode == "noisy_or":
+        slot_existence = 1.0 - torch.prod(1.0 - probabilities, dim=-1)
+    elif slot_existence_mode == "max_logit":
+        if not math.isfinite(slot_temperature) or slot_temperature <= 0.0:
+            raise ValueError("slot_temperature必须为有限正数")
+        if values_are_logits:
+            slot_logits = values
+        else:
+            eps = torch.finfo(probabilities.dtype).eps
+            slot_logits = torch.logit(probabilities.clamp(eps, 1.0 - eps))
+        slot_existence = torch.sigmoid(slot_logits.amax(dim=-1) / slot_temperature)
+    else:
+        raise ValueError(f"未知slot_existence_mode: {slot_existence_mode}")
     subband_union = 1.0 - torch.prod(1.0 - probabilities, dim=-2)
     covered = matrix * subband_union.unsqueeze(-2)
     frequency_weights = 1.0 - torch.prod(1.0 - covered, dim=-1)
