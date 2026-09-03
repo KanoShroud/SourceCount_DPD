@@ -1,0 +1,30 @@
+{
+  "gate": "E2E-G2",
+  "seed": 20260903,
+  "p1_samples_per_k": 8,
+  "grid_chunk": 1024,
+  "frequency_chunk": 128,
+  "eig_device": "cpu",
+  "bypass_atol": 1e-6,
+  "input_gospa_ratio_limit": 1.5,
+  "input_recall_drop_limit": 0.15,
+  "projected_paired_wall_limit_seconds": 7200,
+  "p2_samples": 32,
+  "p2_max_epochs": 120,
+  "p2_evaluate_every": 5,
+  "p2_learning_rate": 0.001,
+  "p2_weight_decay": 0.0001,
+  "p2_gradient_clip": 10.0,
+  "p2_wall_limit_seconds": 1800,
+  "p3_train_samples": 256,
+  "p3_select_samples": 128,
+  "p3_compare_samples": 512,
+  "bootstrap_repetitions": 2000,
+  "batch_size": 4,
+  "loss_weights": {
+    "exist": 1.0,
+    "band": 1.0,
+    "heatmap": 1.0,
+    "offset": 1.0
+  }
+}
