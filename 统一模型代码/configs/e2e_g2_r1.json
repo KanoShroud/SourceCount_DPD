@@ -1,0 +1,28 @@
+{
+  "gate": "E2E-G2-R1",
+  "seed": 20260903,
+  "batch_size": 4,
+  "evaluate_every": 5,
+  "p1_max_epochs": 300,
+  "p1_initial_learning_rate": 0.001,
+  "p1_epoch_121_learning_rate": 0.0003,
+  "p1_epoch_201_learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "gradient_clip": 10.0,
+  "p1_wall_limit_seconds": 900,
+  "p2_max_epochs": 300,
+  "p2_wall_limit_seconds_per_run": 300,
+  "count_minimum": 31,
+  "band_f1_minimum": 0.98,
+  "recall_10m_minimum": 0.95,
+  "recall_30m_minimum": 0.95,
+  "loss_weights": {
+    "exist": 1.0,
+    "band": 1.0,
+    "heatmap": 1.0,
+    "offset": 1.0
+  },
+  "grid_chunk": 1024,
+  "frequency_chunk": 128,
+  "eig_device": "cpu"
+}

@@ -1,0 +1,21 @@
+{
+  "gate": "E2E-G2-R2-D1",
+  "seed": 20260904,
+  "bootstrap_repetitions": 2000,
+  "compare_chunk_size": 32,
+  "forward_batch_size": 4,
+  "calibration_threshold_min": -2.0,
+  "calibration_threshold_max": 2.0,
+  "calibration_threshold_step": 0.05,
+  "gradient_sample_count": 64,
+  "gradient_batch_size": 4,
+  "gradient_trigger_drop": 0.005,
+  "auxiliary_margin": 0.01,
+  "loss_weights": {
+    "exist": 1.0,
+    "band": 1.0,
+    "heatmap": 1.0,
+    "offset": 1.0
+  },
+  "hard_timeout_seconds": 3600
+}

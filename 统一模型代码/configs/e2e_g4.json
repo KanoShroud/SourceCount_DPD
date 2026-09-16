@@ -1,0 +1,32 @@
+{
+  "gate": "E2E-G4",
+  "screen_seed": 20260907,
+  "confirm_seed": 20260908,
+  "batch_size": 4,
+  "screen_epoch": 16,
+  "comparison_epoch": 24,
+  "extension_epoch": 32,
+  "evaluate_every": 2,
+  "endpoint_learning_rate": 0.0001,
+  "d8_tail_learning_rate": 0.00002,
+  "ch3_tail_learning_rate": 0.00001,
+  "weight_decay": 0.0001,
+  "gradient_clip": 10.0,
+  "bootstrap_repetitions": 2000,
+  "recall_100m_noninferiority": -0.01,
+  "coverage_noninferiority": -0.01,
+  "rmse_ratio_maximum": 1.05,
+  "gospa_tie_margin_m": 0.5,
+  "auxiliary_material_drop": 0.03,
+  "track_wall_limit_seconds": 7200,
+  "total_training_wall_limit_seconds": 14400,
+  "loss_weights": {
+    "exist": 1.0,
+    "band": 1.0,
+    "heatmap": 1.0,
+    "offset": 1.0
+  },
+  "grid_chunk": 1024,
+  "frequency_chunk": 128,
+  "eig_device": "cpu"
+}

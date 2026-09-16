@@ -1,0 +1,30 @@
+{
+  "gate": "E2E-G3",
+  "historical_seed": 20260904,
+  "confirmation_seeds": [20260905, 20260906],
+  "batch_size": 4,
+  "comparison_epoch": 38,
+  "extension_epoch": 60,
+  "late_best_epochs": [36, 38],
+  "evaluate_every": 2,
+  "learning_rate_epoch_1": 0.001,
+  "learning_rate_epoch_16": 0.0003,
+  "learning_rate_epoch_26": 0.0001,
+  "weight_decay": 0.0001,
+  "gradient_clip": 10.0,
+  "gradient_probe_every_steps": 256,
+  "bootstrap_repetitions": 2000,
+  "recall_100m_noninferiority": -0.01,
+  "auxiliary_drop_maximum": 0.01,
+  "track_wall_limit_seconds": 1200,
+  "total_wall_limit_seconds": 5400,
+  "loss_weights": {
+    "exist": 1.0,
+    "band": 1.0,
+    "heatmap": 1.0,
+    "offset": 1.0
+  },
+  "grid_chunk": 1024,
+  "frequency_chunk": 128,
+  "eig_device": "cpu"
+}
